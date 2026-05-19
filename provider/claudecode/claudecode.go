@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -574,6 +575,17 @@ func (p *Provider) buildCLIArgs(req bridle.ProviderRequest, sessionIsNew bool) (
 		}
 		if len(allowed) > 0 {
 			args = append(args, "--allowedTools", strings.Join(allowed, ","))
+		}
+	} else if req.Cwd != "" {
+		// Pass --mcp-config explicitly to bypass claude-code's
+		// per-project trust system. cmd.Dir alone triggers
+		// auto-discovery from .mcp.json, but that path requires
+		// an interactive trust prompt for newly-added servers.
+		// --mcp-config loads the file fresh on every invocation
+		// without requiring prior approval.
+		mcpPath := filepath.Join(req.Cwd, ".mcp.json")
+		if _, statErr := os.Stat(mcpPath); statErr == nil {
+			args = append(args, "--mcp-config", mcpPath)
 		}
 	}
 

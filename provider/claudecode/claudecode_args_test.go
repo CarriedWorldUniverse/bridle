@@ -1,6 +1,8 @@
 package claudecode
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -265,10 +267,93 @@ func TestBuildCLIArgs_MCPWithServers(t *testing.T) {
 		t.Error("--model should still be present")
 	}
 
-	// Verify --mcp-config is NOT passed (cwd-based discovery is the mechanism).
+	// --mcp-config NOT passed when Cwd is empty (no path to resolve).
 	if indexOf(args, "--mcp-config") >= 0 {
-		t.Error("--mcp-config should not be passed; cwd-based .mcp.json discovery is used")
+		t.Error("--mcp-config should not be passed when Cwd is empty")
 	}
+}
+
+func TestBuildCLIArgs_MCPConfigFlag(t *testing.T) {
+	t.Run("MCP set with Cwd and .mcp.json present → --mcp-config added", func(t *testing.T) {
+		dir := t.TempDir()
+		mcpPath := filepath.Join(dir, ".mcp.json")
+		if err := os.WriteFile(mcpPath, []byte(`{"mcpServers":{}}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		p := New()
+		req := bridle.ProviderRequest{
+			MCP: &bridle.MCPClientConfig{},
+			Cwd: dir,
+		}
+		args, _, err := p.buildCLIArgs(req, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		idx := indexOf(args, "--mcp-config")
+		if idx < 0 {
+			t.Error("--mcp-config should be present when MCP is set and .mcp.json exists")
+		} else if idx+1 >= len(args) || args[idx+1] != mcpPath {
+			got := ""
+			if idx+1 < len(args) {
+				got = args[idx+1]
+			}
+			t.Errorf("--mcp-config path = %q, want %q", got, mcpPath)
+		}
+
+		// --allowedTools must still be suppressed.
+		if indexOf(args, "--allowedTools") >= 0 {
+			t.Error("--allowedTools should be absent when MCP is configured")
+		}
+	})
+
+	t.Run("MCP set with Cwd but .mcp.json absent → --mcp-config skipped", func(t *testing.T) {
+		dir := t.TempDir()
+		// Don't create .mcp.json in this dir.
+
+		p := New()
+		req := bridle.ProviderRequest{
+			MCP: &bridle.MCPClientConfig{},
+			Cwd: dir,
+		}
+		args, _, err := p.buildCLIArgs(req, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if indexOf(args, "--mcp-config") >= 0 {
+			t.Error("--mcp-config should be absent when .mcp.json does not exist")
+		}
+	})
+
+	t.Run("MCP nil with Cwd and .mcp.json present → --mcp-config absent (backward compat)", func(t *testing.T) {
+		dir := t.TempDir()
+		mcpPath := filepath.Join(dir, ".mcp.json")
+		if err := os.WriteFile(mcpPath, []byte(`{"mcpServers":{}}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		p := New()
+		p.AllowedTools = []string{"Bash"}
+		req := bridle.ProviderRequest{
+			MCP:   nil,
+			Cwd:   dir,
+			Tools: []bridle.ToolDef{{Name: "Read"}},
+		}
+		args, _, err := p.buildCLIArgs(req, false)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if indexOf(args, "--mcp-config") >= 0 {
+			t.Error("--mcp-config should be absent when MCP is nil")
+		}
+		// --allowedTools should be present since MCP is nil.
+		if indexOf(args, "--allowedTools") < 0 {
+			t.Error("--allowedTools should be present when MCP is nil")
+		}
+	})
 }
 
 func TestBuildCLIArgs_SystemPromptInline(t *testing.T) {
