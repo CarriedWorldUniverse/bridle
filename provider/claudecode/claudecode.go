@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
@@ -255,18 +256,27 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 	}()
 
 	streamDone := make(chan struct{})
-	var result bridle.ProviderResult
+	var presult parseResult
 	var parseErr error
 	go func() {
 		defer close(streamDone)
-		result, parseErr = parseStream(stdoutPipe, sink)
+		presult, parseErr = parseStream(stdoutPipe, sink)
 	}()
 
+	startTime := time.Now()
 	waitErr := cmd.Wait()
+	runtime := time.Since(startTime)
 	close(procExited) // signal the cancel watcher that the process is gone
 	<-streamDone
 
+	result := presult.ProviderResult
 	stderrStr := stderr.String()
+
+	// Persist stderr to a dedicated log file with rotation so operators
+	// can inspect claude-code's diagnostic output after a subprocess
+	// error, even for turns that are later compacted out of the activity
+	// log. Always written when non-empty — not just on error.
+	stderrLogPath := writeStderrLog(req.Cwd, stderrStr)
 
 	if waitErr != nil && parseErr == nil {
 		if ctx.Err() != nil {
@@ -274,10 +284,12 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 		} else if result.FinalText != "" || len(result.ToolCalls) > 0 || len(result.SessionDelta) > 0 {
 			pe := classifyProviderError(stderrStr, waitErr)
 			if pe.Kind == bridle.ProviderErrorAuthFailed || pe.Kind == bridle.ProviderErrorRateLimit || pe.Kind == bridle.ProviderErrorServerError {
-				// API-level error — the "content" is a synthetic
-				// response from the CLI (e.g. "Not logged in"), not
-				// a model answer. Discard it so the funnel doesn't
-				// auto-post an auth-failure message as model output.
+				// Enrich the error message with subprocess diagnostics
+				// so operators can distinguish exit-code vs signal,
+				// see what the last stream event was, and find the
+				// stderr log file — even when the content is discarded
+				// as a synthetic CLI response.
+				pe.Err = fmt.Errorf("%w [%s]", waitErr, diagnosticsSuffix(waitErr, presult, runtime, stderrLogPath))
 				sink.Emit(bridle.TurnError{Err: pe, Stage: string(pe.Kind)})
 				return bridle.ProviderResult{}, pe
 			}
@@ -289,11 +301,12 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 			// silently dropped because we return ProviderResult{} (#219).
 			result.StopReason = bridle.StopReasonProcessExit
 			sink.Emit(bridle.TurnError{
-				Err:   fmt.Errorf("claudecode: subprocess exited non-zero with partial content: %w", waitErr),
+				Err:   fmt.Errorf("claudecode: subprocess exited non-zero with partial content: %w [%s]", waitErr, diagnosticsSuffix(waitErr, presult, runtime, stderrLogPath)),
 				Stage: "subprocess_exit_partial",
 			})
 		} else {
 			pe := classifyProviderError(stderrStr, waitErr)
+			pe.Err = fmt.Errorf("%w [%s]", waitErr, diagnosticsSuffix(waitErr, presult, runtime, stderrLogPath))
 			sink.Emit(bridle.TurnError{Err: pe, Stage: string(pe.Kind)})
 			return bridle.ProviderResult{}, pe
 		}
@@ -318,6 +331,7 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 		if stderrStr != "" {
 			msg += " (stderr: " + strings.TrimSpace(stderrStr) + ")"
 		}
+		msg += " [" + diagnosticsSuffix(waitErr, presult, runtime, stderrLogPath) + "]"
 		parseErr = fmt.Errorf("%s", msg)
 		sink.Emit(bridle.TurnError{Err: parseErr, Stage: "stream_truncated"})
 	}
@@ -331,8 +345,25 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 	return result, parseErr
 }
 
+// parseResult wraps a ProviderResult with diagnostic metadata collected
+// during stream parsing. Used internally to enrich error messages.
+type parseResult struct {
+	bridle.ProviderResult
+	lastEventType    string
+	lastEventExcerpt string
+}
+
+// excerpt returns the first max characters of the given line as a string.
+func excerpt(line []byte, max int) string {
+	s := string(line)
+	if len(s) <= max {
+		return s
+	}
+	return s[:max]
+}
+
 // parseStream reads stream-json lines and maps them to bridle events + result.
-func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, error) {
+func parseStream(r io.Reader, sink bridle.EventSink) (parseResult, error) {
 	var (
 		finalText    string
 		toolCalls    []bridle.ToolInvocation
@@ -341,6 +372,9 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 		stopReason   bridle.StopReason
 		stepCount    int
 		gotResult    bool
+
+		lastEventType    string
+		lastEventExcerpt string
 	)
 
 	pendingCalls := map[string]bridle.ToolCallStart{}
@@ -360,6 +394,10 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 
 		var eventType string
 		json.Unmarshal(event["type"], &eventType) //nolint:errcheck
+
+		// Track last event for diagnostics on subprocess error.
+		lastEventType = eventType
+		lastEventExcerpt = excerpt(line, 200)
 
 		// API error detection: claude-code emits events with
 		// is_api_error=true and error=<classification> when the
@@ -509,27 +547,35 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 	}
 
 	if err := scanner.Err(); err != nil && err != io.EOF {
-		return bridle.ProviderResult{}, fmt.Errorf("claudecode: stream read: %w", err)
+		return parseResult{}, fmt.Errorf("claudecode: stream read: %w", err)
 	}
 
 	if !gotResult {
 		// Leave StopReason empty so RunTurn can detect stream_truncated.
-		return bridle.ProviderResult{
+		return parseResult{
+			ProviderResult: bridle.ProviderResult{
+				FinalText:    finalText,
+				ToolCalls:    toolCalls,
+				StepCount:    stepCount,
+				Usage:        usage,
+				SessionDelta: sessionDelta,
+			},
+			lastEventType:    lastEventType,
+			lastEventExcerpt: lastEventExcerpt,
+		}, nil
+	}
+
+	return parseResult{
+		ProviderResult: bridle.ProviderResult{
 			FinalText:    finalText,
 			ToolCalls:    toolCalls,
 			StepCount:    stepCount,
 			Usage:        usage,
+			StopReason:   stopReason,
 			SessionDelta: sessionDelta,
-		}, nil
-	}
-
-	return bridle.ProviderResult{
-		FinalText:    finalText,
-		ToolCalls:    toolCalls,
-		StepCount:    stepCount,
-		Usage:        usage,
-		StopReason:   stopReason,
-		SessionDelta: sessionDelta,
+		},
+		lastEventType:    lastEventType,
+		lastEventExcerpt: lastEventExcerpt,
 	}, nil
 }
 
@@ -824,4 +870,71 @@ func classifyProviderError(stderr string, waitErr error) *bridle.ProviderError {
 		Message: "claude-code: subprocess exited with error",
 		Err:     waitErr,
 	}
+}
+
+// rotateLogs shifts claude-stderr.log → .1 → .2 (deleting .2) when the
+// current log exceeds the cap. Retains the 3 most recent generations.
+func rotateLogs(path string) {
+	fi, err := os.Stat(path)
+	if err != nil || fi.Size() < 10*1024*1024 {
+		return
+	}
+	// Remove oldest rotation (retain 3: current + .1 + .2).
+	os.Remove(path + ".2")
+	os.Rename(path+".1", path+".2")
+	os.Rename(path, path+".1")
+}
+
+// writeStderrLog persists claude-code stderr output to a dedicated log
+// file so operators can inspect diagnostic output after a subprocess
+// error, even for turns compacted out of the activity log. Returns the
+// log file path on success, "" if stderr is empty or Cwd is unset.
+// Rotates at 10 MiB, keeping the 3 most recent generations.
+func writeStderrLog(cwd, stderr string) string {
+	if cwd == "" || stderr == "" {
+		return ""
+	}
+	tmpDir := filepath.Join(cwd, "tmp")
+	if err := os.MkdirAll(tmpDir, 0700); err != nil {
+		return ""
+	}
+	logPath := filepath.Join(tmpDir, "claude-stderr.log")
+	rotateLogs(logPath)
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "=== %s ===\n%s\n", time.Now().Format(time.RFC3339), stderr)
+	return logPath
+}
+
+// diagnosticsSuffix builds a machine-readable suffix for subprocess error
+// messages: exit code / signal, runtime, last stream-json event type and
+// excerpt, and the path to the stderr log file.
+func diagnosticsSuffix(waitErr error, presult parseResult, runtime time.Duration, stderrLogPath string) string {
+	parts := []string{fmt.Sprintf("runtime=%s", runtime.Round(time.Millisecond))}
+
+	var exitErr *exec.ExitError
+	if errors.As(waitErr, &exitErr) {
+		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+			if status.Signaled() {
+				parts = append(parts, fmt.Sprintf("signal=%s", status.Signal()))
+			} else {
+				parts = append(parts, fmt.Sprintf("exit_code=%d", status.ExitStatus()))
+			}
+		}
+	}
+
+	if presult.lastEventType != "" {
+		parts = append(parts, fmt.Sprintf("last_event=%s", presult.lastEventType))
+	}
+	if presult.lastEventExcerpt != "" {
+		parts = append(parts, fmt.Sprintf("last_event_excerpt=%q", presult.lastEventExcerpt))
+	}
+	if stderrLogPath != "" {
+		parts = append(parts, fmt.Sprintf("stderr_log=%s", stderrLogPath))
+	}
+
+	return strings.Join(parts, " ")
 }
