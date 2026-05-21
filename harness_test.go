@@ -89,6 +89,58 @@ func TestRunTurn_OneToolCall(t *testing.T) {
 		"ToolCallStart", "ToolCallResult", "StepBoundary", "ModelChunk", "TurnDone")
 }
 
+// --- subprocess-stream provider (self-executing tools) ---
+
+// NEX-251 regression: a self-executing provider (SupportsCustomTools=false)
+// must NOT cause RunTurn to re-invoke the provider when it returns a record
+// of tools the subprocess already ran. The previous behavior treated those
+// records as tool work for bridle to execute and looped back into the
+// provider — for claudecode that re-fired the original user prompt as the
+// -p arg of a second `claude -p --resume` call, doubling the session jsonl
+// entries on every turn that used a tool.
+func TestRunTurn_SelfExecutingProviderDoesNotReinvoke(t *testing.T) {
+	p := fake.NewSubprocessProvider(
+		fake.SubprocessStep{
+			Text: "ok",
+			ToolCalls: []bridle.ToolCallStart{
+				{ID: "1", Name: "Bash", Args: rawJSON(`{}`)},
+			},
+			ToolResults: []bridle.ToolCallResult{
+				{ID: "1", Result: rawJSON(`"done"`)},
+			},
+			StopReason: bridle.StopReasonModelDone,
+		},
+		// A second scripted step exists so a buggy harness that re-invokes
+		// would consume it and StepsRemaining would drop to 0. With the
+		// NEX-251 fix the loop exits after one iteration and this step is
+		// never consumed.
+		fake.SubprocessStep{Text: "should not be reached"},
+	)
+	h := bridle.NewHarness(p)
+	sink := &fake.SliceEventSink{}
+
+	result, err := h.RunTurn(context.Background(), bridle.TurnRequest{
+		Model:    "fake-subprocess",
+		MaxSteps: 5,
+	}, fake.NewToolRunner(nil), sink)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if p.StepsRemaining() != 1 {
+		t.Errorf("provider re-invoked: StepsRemaining = %d; want 1 (only first step consumed)", p.StepsRemaining())
+	}
+	if result.FinalText != "ok" {
+		t.Errorf("FinalText = %q; want %q", result.FinalText, "ok")
+	}
+	if len(result.ToolCalls) != 1 || result.ToolCalls[0].Name != "Bash" {
+		t.Errorf("ToolCalls = %+v; want one Bash invocation recorded for observability", result.ToolCalls)
+	}
+	if result.StopReason != bridle.StopReasonModelDone {
+		t.Errorf("StopReason = %q; want model_done", result.StopReason)
+	}
+}
+
 // --- MaxSteps cap ---
 
 func TestRunTurn_MaxSteps(t *testing.T) {
