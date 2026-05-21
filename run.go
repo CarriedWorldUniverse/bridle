@@ -91,6 +91,21 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 		totalUsage = addUsage(totalUsage, presult.Usage)
 		sessionDelta = append(sessionDelta, presult.SessionDelta...)
 
+		// Self-executing providers (claude-code, gemini-cli — anything
+		// whose subprocess runs the tools itself) populate ToolCalls as
+		// a record of work already done, not a request to bridle. Don't
+		// re-execute via runner.Run; don't re-invoke the provider with
+		// synthesized tool_results. NEX-251: re-invoking caused the
+		// claudecode buildPrompt path to refire the original user prompt
+		// as -p on a second `claude -p --resume` call, doubling the
+		// session jsonl entries the model sees on subsequent turns.
+		// Record the invocations for observability and exit the loop.
+		if !caps.SupportsCustomTools {
+			allInvocations = append(allInvocations, presult.ToolCalls...)
+			stopReason = presult.StopReason
+			break
+		}
+
 		// No tool calls → turn is done.
 		if len(presult.ToolCalls) == 0 {
 			stopReason = presult.StopReason
