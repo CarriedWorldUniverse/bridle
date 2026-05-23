@@ -64,7 +64,7 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 		// Run the provider turn.
 		presult, err := h.provider.RunTurn(ctx, preq, sink)
 		if err != nil {
-			sink.Emit(TurnError{Err: err, Stage: "provider"})
+			sink.Emit(TurnError{Err: err, Stage: TurnErrorStageProvider})
 			return TurnResult{
 				FinalText:  finalText,
 				ToolCalls:  allInvocations,
