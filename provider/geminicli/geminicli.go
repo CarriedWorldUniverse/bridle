@@ -29,7 +29,7 @@ import (
 	bridle "github.com/CarriedWorldUniverse/bridle"
 )
 
-const providerID bridle.ProviderID = "gemini-cli"
+const providerID = bridle.ProviderGeminiCLI
 
 // Provider implements bridle.Provider by shelling out to the gemini CLI.
 type Provider struct {
