@@ -115,4 +115,10 @@ type ProviderResult struct {
 	Usage        Usage
 	StopReason   StopReason
 	SessionDelta []SessionEvent
+	// ResolvedModel is the model id the upstream API actually returned
+	// (e.g. "claude-3-5-sonnet-20241022"). May differ from
+	// ProviderRequest.Model when per-turn ProviderEnv routed the call
+	// elsewhere. Empty when the provider doesn't surface a model id.
+	// Flows into TurnResult.ResolvedModel.
+	ResolvedModel string
 }

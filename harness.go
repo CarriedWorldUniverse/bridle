@@ -161,13 +161,24 @@ type TurnRequest struct {
 }
 
 // TurnResult is the structured outcome of a completed turn.
+//
+// ResolvedModel is the model identifier the upstream API actually
+// returned (Anthropic Messages.Model, OpenAI ChatCompletion.Model,
+// claudecode result-event model, etc.). It can differ from
+// TurnRequest.Model when per-turn ProviderEnv routes the call to a
+// different backend — operator pool's Claude credit vs. DeepSeek-via-
+// Anthropic-shape credential vs. OpenAI. Empty when the provider
+// doesn't surface a model id. Callers attributing usage/cost/identity
+// should prefer ResolvedModel when non-empty, fallback to
+// TurnRequest.Model.
 type TurnResult struct {
-	FinalText    string           // model's last assistant text (may be empty for tool-only turns)
-	ToolCalls    []ToolInvocation // ordered list of what the model actually did
-	StepCount    int
-	Usage        Usage
-	StopReason   StopReason
-	SessionDelta []SessionEvent // events to propose to the funnel-owned JSONL
+	FinalText     string           // model's last assistant text (may be empty for tool-only turns)
+	ToolCalls     []ToolInvocation // ordered list of what the model actually did
+	StepCount     int
+	Usage         Usage
+	StopReason    StopReason
+	ResolvedModel string         // model id the upstream API reported; empty when unknown
+	SessionDelta  []SessionEvent // events to propose to the funnel-owned JSONL
 }
 
 // EventSink receives events as the turn unfolds.

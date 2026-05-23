@@ -218,7 +218,7 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 	if err != nil {
 		return bridle.ProviderResult{}, fmt.Errorf("bedrock: ConverseStream: %w", err)
 	}
-	return extractStreamResult(ctx, streamOut, sink)
+	return extractStreamResult(ctx, streamOut, sink, req.Model)
 }
 
 // extractStreamResult drains the ConverseStream event stream into a
@@ -233,7 +233,7 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 //   - Metadata               — usage + trace
 //
 // Each ContentBlock has an Index that ties Start/Delta/Stop together.
-func extractStreamResult(ctx context.Context, out *bedrockruntime.ConverseStreamOutput, sink bridle.EventSink) (bridle.ProviderResult, error) {
+func extractStreamResult(ctx context.Context, out *bedrockruntime.ConverseStreamOutput, sink bridle.EventSink, modelID string) (bridle.ProviderResult, error) {
 	_ = ctx
 	stream := out.GetStream()
 	defer stream.Close()
@@ -356,11 +356,12 @@ func extractStreamResult(ctx context.Context, out *bedrockruntime.ConverseStream
 	}
 
 	return bridle.ProviderResult{
-		FinalText:    finalText.String(),
-		ToolCalls:    toolCalls,
-		Usage:        usage,
-		StopReason:   normalize.BedrockStopReason(rawStop),
-		SessionDelta: sessionDelta,
+		FinalText:     finalText.String(),
+		ToolCalls:     toolCalls,
+		Usage:         usage,
+		StopReason:    normalize.BedrockStopReason(rawStop),
+		ResolvedModel: modelID,
+		SessionDelta:  sessionDelta,
 	}, nil
 }
 

@@ -768,6 +768,59 @@ func (p *panicProvider) RunTurn(_ context.Context, _ bridle.ProviderRequest, _ b
 // tool call followed by more text — observed 2026-05-14 with keel
 // producing a 1306-token cairn spec review whose substantive 6-point
 // analysis was silently dropped because only the closing coda survived.
+// TestRunTurn_ResolvedModelPropagates verifies the upstream model id
+// the provider reported flows through into TurnResult.ResolvedModel.
+// Catches the silent-divergence class where per-turn ProviderEnv
+// routes the call to a different backend than cfg.Model and the
+// activity log reports the configured-but-not-actually-used model.
+func TestRunTurn_ResolvedModelPropagates(t *testing.T) {
+	p := fake.NewProvider(fake.Step{
+		Text:          "ok",
+		ResolvedModel: "deepseek-chat-v3-via-anthropic-shape",
+	})
+	h := bridle.NewHarness(p)
+	result, err := h.RunTurn(context.Background(), bridle.TurnRequest{
+		Model: "claude-3-5-sonnet-20241022", // what the operator THINKS they're calling
+	}, fake.NewToolRunner(nil), &fake.SliceEventSink{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.ResolvedModel != "deepseek-chat-v3-via-anthropic-shape" {
+		t.Errorf("ResolvedModel = %q; want deepseek-... (provider report should win over cfg.Model)", result.ResolvedModel)
+	}
+}
+
+// TestRunTurn_ResolvedModelLastRoundWins verifies that across a multi-
+// step turn (text → tool → text), the latest non-empty ResolvedModel
+// is what surfaces — handles a (theoretical) provider that re-routes
+// mid-turn. Empty rounds don't clobber.
+func TestRunTurn_ResolvedModelLastRoundWins(t *testing.T) {
+	toolStep := fake.Step{
+		ToolCalls:     []bridle.ToolInvocation{inv("1", "echo")},
+		ResolvedModel: "round-1-model",
+	}
+	finalStep := fake.Step{
+		Text:          "done",
+		ResolvedModel: "round-2-model",
+	}
+	p := fake.NewProvider(toolStep, finalStep)
+	runner := fake.NewToolRunner(map[string][]fake.ToolResult{
+		"echo": {{Result: rawJSON(`"ok"`)}},
+	})
+	h := bridle.NewHarness(p)
+	result, err := h.RunTurn(context.Background(), bridle.TurnRequest{
+		Model:    "configured-model",
+		Tools:    []bridle.ToolDef{toolDef("echo")},
+		MaxSteps: 5,
+	}, runner, &fake.SliceEventSink{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.ResolvedModel != "round-2-model" {
+		t.Errorf("ResolvedModel = %q; want round-2-model (latest non-empty wins)", result.ResolvedModel)
+	}
+}
+
 func TestRunTurn_TextAccumulatesAcrossSteps(t *testing.T) {
 	// Step 1: model emits substantive text + a tool call.
 	step1 := fake.Step{

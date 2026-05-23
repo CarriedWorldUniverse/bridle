@@ -139,8 +139,9 @@ func extractResult(completion *openai.ChatCompletion) (bridle.ProviderResult, er
 			InputTokens:  int(completion.Usage.PromptTokens),
 			OutputTokens: int(completion.Usage.CompletionTokens),
 		},
-		StopReason:   stopReason,
-		SessionDelta: sessionDelta,
+		StopReason:    stopReason,
+		ResolvedModel: completion.Model,
+		SessionDelta:  sessionDelta,
 	}, nil
 }
 

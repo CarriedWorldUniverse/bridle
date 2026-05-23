@@ -149,8 +149,9 @@ func extractResult(msg *anthropic.Message) (bridle.ProviderResult, error) {
 			CacheReadInputTokens:     int(msg.Usage.CacheReadInputTokens),
 			CacheCreationInputTokens: int(msg.Usage.CacheCreationInputTokens),
 		},
-		StopReason:   stopReason,
-		SessionDelta: sessionDelta,
+		StopReason:    stopReason,
+		ResolvedModel: string(msg.Model),
+		SessionDelta:  sessionDelta,
 	}, nil
 }
 
