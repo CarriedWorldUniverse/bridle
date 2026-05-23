@@ -359,7 +359,7 @@ func extractStreamResult(ctx context.Context, out *bedrockruntime.ConverseStream
 		FinalText:    finalText.String(),
 		ToolCalls:    toolCalls,
 		Usage:        usage,
-		StopReason:   bridle.StopReason(normalize.BedrockStopReason(rawStop)),
+		StopReason:   normalize.BedrockStopReason(rawStop),
 		SessionDelta: sessionDelta,
 	}, nil
 }

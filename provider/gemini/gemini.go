@@ -206,7 +206,7 @@ func extractResult(resp *genai.GenerateContentResponse) (bridle.ProviderResult, 
 		}
 	}
 
-	stopReason := bridle.StopReason(normalize.GeminiStopReason(string(cand.FinishReason)))
+	stopReason := normalize.GeminiStopReason(string(cand.FinishReason))
 
 	usage := bridle.Usage{}
 	if resp.UsageMetadata != nil {

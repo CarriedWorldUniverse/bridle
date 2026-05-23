@@ -145,7 +145,7 @@ func extractResult(resp api.ChatResponse) bridle.ProviderResult {
 		})
 	}
 
-	stopReason := bridle.StopReason(normalize.OllamaStopReason(resp.DoneReason))
+	stopReason := normalize.OllamaStopReason(resp.DoneReason)
 
 	return bridle.ProviderResult{
 		FinalText: resp.Message.Content,

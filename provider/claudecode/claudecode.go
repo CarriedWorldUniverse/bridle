@@ -530,7 +530,7 @@ func parseStream(r io.Reader, sink bridle.EventSink) (parseResult, error) {
 				if res.Result != "" && finalText == "" {
 					finalText = res.Result
 				}
-				stopReason = bridle.StopReason(normalize.ClaudeStopReason(res.StopReason))
+				stopReason = normalize.ClaudeStopReason(res.StopReason)
 				usage.InputTokens = res.Usage.InputTokens
 				usage.OutputTokens = res.Usage.OutputTokens
 				usage.CacheReadInputTokens = res.Usage.CacheReadInputTokens
