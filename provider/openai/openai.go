@@ -95,8 +95,9 @@ func extractResult(completion *openai.ChatCompletion, sink bridle.EventSink) (br
 		sink.Emit(bridle.ModelChunk{Text: msg.Content})
 		finalText = msg.Content
 		sessionDelta = append(sessionDelta, bridle.SessionEvent{
-			Role:    bridle.RoleAssistant,
-			Content: msg.Content,
+			Provider: bridle.ProviderOpenAI,
+			Role:     bridle.RoleAssistant,
+			Content:  msg.Content,
 		})
 	}
 
@@ -109,8 +110,9 @@ func extractResult(completion *openai.ChatCompletion, sink bridle.EventSink) (br
 		})
 		raw, _ := json.Marshal(tc)
 		sessionDelta = append(sessionDelta, bridle.SessionEvent{
-			Role:    bridle.RoleAssistant,
-			RawJSON: raw,
+			Provider: bridle.ProviderOpenAI,
+			Role:     bridle.RoleAssistant,
+			RawJSON:  raw,
 		})
 	}
 

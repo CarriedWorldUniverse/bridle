@@ -107,8 +107,9 @@ func extractResult(resp api.ChatResponse) bridle.ProviderResult {
 
 	if resp.Message.Content != "" {
 		sessionDelta = append(sessionDelta, bridle.SessionEvent{
-			Role:    bridle.RoleAssistant,
-			Content: resp.Message.Content,
+			Provider: bridle.ProviderOllama,
+			Role:     bridle.RoleAssistant,
+			Content:  resp.Message.Content,
 		})
 	}
 
@@ -125,8 +126,9 @@ func extractResult(resp api.ChatResponse) bridle.ProviderResult {
 		})
 		raw, _ := json.Marshal(tc)
 		sessionDelta = append(sessionDelta, bridle.SessionEvent{
-			Role:    bridle.RoleAssistant,
-			RawJSON: raw,
+			Provider: bridle.ProviderOllama,
+			Role:     bridle.RoleAssistant,
+			RawJSON:  raw,
 		})
 	}
 

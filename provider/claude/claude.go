@@ -101,8 +101,9 @@ func extractResult(msg *anthropic.Message, sink bridle.EventSink) (bridle.Provid
 			sink.Emit(bridle.ModelChunk{Text: b.Text})
 			finalText += b.Text
 			sessionDelta = append(sessionDelta, bridle.SessionEvent{
-				Role:    bridle.RoleAssistant,
-				Content: b.Text,
+				Provider: bridle.ProviderClaude,
+				Role:     bridle.RoleAssistant,
+				Content:  b.Text,
 			})
 
 		case anthropic.ToolUseBlock:
@@ -113,8 +114,9 @@ func extractResult(msg *anthropic.Message, sink bridle.EventSink) (bridle.Provid
 			})
 			raw, _ := json.Marshal(b)
 			sessionDelta = append(sessionDelta, bridle.SessionEvent{
-				Role:    bridle.RoleAssistant,
-				RawJSON: raw,
+				Provider: bridle.ProviderClaude,
+				Role:     bridle.RoleAssistant,
+				RawJSON:  raw,
 			})
 		}
 	}
