@@ -34,11 +34,13 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 	// Lower TurnRequest → ProviderRequest.
 	preq := lowerRequest(req)
 
-	// BeforeModelCall hook (step 0 = the initial call).
-	hc := BeforeModelCallCtx{Request: req, Step: 0}
+	// BeforeModelCall hook (step 0 = the initial call). Hook receives
+	// &preq so mutations to Model/Tools/Messages/etc. apply to the
+	// upcoming call.
+	hc := BeforeModelCallCtx{Request: &preq, Step: 0}
 	var aborted bool
 	var herr error
-	hc, aborted, herr = h.hooks.runBeforeModelCall(ctx, hc)
+	_, aborted, herr = h.hooks.runBeforeModelCall(ctx, hc)
 	if herr != nil {
 		return partialAbort(), herr
 	}
@@ -216,16 +218,17 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 		// Append tool results to message history.
 		preq.Messages = append(preq.Messages, toolMessages...)
 
-		// BeforeModelCall hook for the next round.
-		hc = BeforeModelCallCtx{Request: req, Step: stepCount}
-		hc, aborted, herr = h.hooks.runBeforeModelCall(ctx, hc)
+		// BeforeModelCall hook for the next round. Hook receives &preq so
+		// per-step mutations (escalate model, drop a tool, append a
+		// system reminder message) apply to the next provider call.
+		hc = BeforeModelCallCtx{Request: &preq, Step: stepCount}
+		_, aborted, herr = h.hooks.runBeforeModelCall(ctx, hc)
 		if herr != nil {
 			return partialAbortWith(finalText, allInvocations, stepCount, totalUsage), herr
 		}
 		if aborted {
 			return partialAbortWith(finalText, allInvocations, stepCount, totalUsage), nil
 		}
-		_ = hc
 	}
 
 	result := TurnResult{

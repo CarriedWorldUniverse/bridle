@@ -15,8 +15,20 @@ const (
 type Hook[T any] func(ctx context.Context, in T) (T, HookAction, error)
 
 // BeforeModelCallCtx carries context passed to BeforeModelCall hooks.
+//
+// Request points at the live ProviderRequest that the harness is about
+// to send to the provider — the same struct, not a copy. Hooks may
+// mutate its fields in place (Model, AppendSystemPrompt, Tools,
+// ProviderEnv, Messages, etc.) and the changes apply to the upcoming
+// call. The hook fires once before the initial call (Step=0) and once
+// before every subsequent call inside the tool loop (Step=N), so
+// per-step mutations (escalate model on N, drop a tool once used) work.
+//
+// Mutating Messages is supported but advanced: by the time the in-loop
+// hook fires, the harness has already appended the assistant tool_use
+// turn and the tool_result blocks for the round just completed.
 type BeforeModelCallCtx struct {
-	Request TurnRequest
+	Request *ProviderRequest
 	Step    int
 }
 
