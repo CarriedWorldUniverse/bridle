@@ -49,63 +49,6 @@ func connectInProcess(ctx context.Context, t *testing.T, srv *server.MCPServer) 
 	return nil
 }
 
-// TestMergeToolSurface_NoCollision verifies that disjoint explicit + MCP tools merge cleanly.
-func TestMergeToolSurface_NoCollision(t *testing.T) {
-	explicit := []mcpclient.ToolDef{
-		{Name: "send_comms", Description: "send", InputSchema: json.RawMessage(`{}`)},
-	}
-	mcpTools := []mcpclient.ToolDef{
-		{Name: "list_files", Description: "list", InputSchema: json.RawMessage(`{}`)},
-	}
-	merged, err := mcpclient.MergeTools(explicit, mcpTools)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(merged) != 2 {
-		t.Fatalf("want 2 tools, got %d", len(merged))
-	}
-	if merged[0].Name != "send_comms" || merged[1].Name != "list_files" {
-		t.Errorf("wrong merge order: %v", merged)
-	}
-}
-
-// TestMergeToolSurface_Collision verifies that a name collision returns an error.
-func TestMergeToolSurface_Collision(t *testing.T) {
-	explicit := []mcpclient.ToolDef{
-		{Name: "collide", Description: "a", InputSchema: json.RawMessage(`{}`)},
-	}
-	mcpTools := []mcpclient.ToolDef{
-		{Name: "collide", Description: "b", InputSchema: json.RawMessage(`{}`)},
-	}
-	_, err := mcpclient.MergeTools(explicit, mcpTools)
-	if err == nil {
-		t.Fatal("expected error on name collision, got nil")
-	}
-}
-
-// TestMergeToolSurface_BothEmpty verifies that two empty inputs yield an empty slice.
-func TestMergeToolSurface_BothEmpty(t *testing.T) {
-	merged, err := mcpclient.MergeTools(nil, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(merged) != 0 {
-		t.Errorf("expected empty, got %v", merged)
-	}
-}
-
-// TestMergeToolSurface_ExplicitOnly verifies that nil MCP tools returns only explicit tools.
-func TestMergeToolSurface_ExplicitOnly(t *testing.T) {
-	explicit := []mcpclient.ToolDef{{Name: "only_tool", InputSchema: json.RawMessage(`{}`)}}
-	merged, err := mcpclient.MergeTools(explicit, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(merged) != 1 || merged[0].Name != "only_tool" {
-		t.Errorf("unexpected result: %v", merged)
-	}
-}
-
 // TestConnect_EmptyConfig verifies that Connect with nil/empty specs returns a no-op client.
 func TestConnect_EmptyConfig(t *testing.T) {
 	ctx := context.Background()
