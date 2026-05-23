@@ -203,29 +203,6 @@ func extractText(contents []mcp.Content) string {
 	return "(no text content)"
 }
 
-// MergeTools merges explicit ToolDefs with MCP-loaded ToolDefs, checking
-// for name collisions. The returned slice preserves explicit tools first.
-func MergeTools(explicit, mcpTools []ToolDef) ([]ToolDef, error) {
-	seen := make(map[string]struct{}, len(explicit))
-	for _, t := range explicit {
-		seen[t.Name] = struct{}{}
-	}
-	merged := make([]ToolDef, len(explicit), len(explicit)+len(mcpTools))
-	copy(merged, explicit)
-	for _, t := range mcpTools {
-		if _, dup := seen[t.Name]; dup {
-			return nil, collisionError("tool name collision: " + t.Name)
-		}
-		seen[t.Name] = struct{}{}
-		merged = append(merged, t)
-	}
-	return merged, nil
-}
-
-type collisionError string
-
-func (e collisionError) Error() string { return string(e) }
-
 func envSlice(m map[string]string) []string {
 	out := make([]string, 0, len(m))
 	for k, v := range m {
