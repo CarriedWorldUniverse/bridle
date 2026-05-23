@@ -92,13 +92,14 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		return bridle.ProviderResult{}, fmt.Errorf("openai: API error: %w", err)
 	}
 
-	return extractResult(&acc.ChatCompletion, sink, true /*streamed*/)
+	return extractResult(&acc.ChatCompletion)
 }
 
-// extractResult pulls finalText/toolCalls/usage out of a ChatCompletion.
-// When streamed=true the caller has already emitted ModelChunks during
-// the stream, so this skips the sink.Emit to avoid double-painting.
-func extractResult(completion *openai.ChatCompletion, sink bridle.EventSink, streamed bool) (bridle.ProviderResult, error) {
+// extractResult pulls finalText/toolCalls/usage out of an accumulated
+// ChatCompletion. Chunks were already emitted live during the stream
+// loop, so this just lowers the assembled completion into a
+// bridle.ProviderResult.
+func extractResult(completion *openai.ChatCompletion) (bridle.ProviderResult, error) {
 	if len(completion.Choices) == 0 {
 		return bridle.ProviderResult{StopReason: bridle.StopReasonModelDone}, nil
 	}
@@ -111,15 +112,7 @@ func extractResult(completion *openai.ChatCompletion, sink bridle.EventSink, str
 	var sessionDelta []bridle.SessionEvent
 
 	if msg.Content != "" {
-		if !streamed {
-			sink.Emit(bridle.ModelChunk{Text: msg.Content})
-		}
-		finalText = msg.Content
-		sessionDelta = append(sessionDelta, bridle.SessionEvent{
-			Provider: bridle.ProviderOpenAI,
-			Role:     bridle.RoleAssistant,
-			Content:  msg.Content,
-		})
+		bridle.AppendAssistantText(&finalText, &sessionDelta, bridle.ProviderOpenAI, msg.Content)
 	}
 
 	for _, tc := range msg.ToolCalls {

@@ -251,19 +251,13 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 			}
 			if err := json.Unmarshal(line, &ev); err == nil {
 				if ev.Role == "assistant" {
-					sink.Emit(bridle.ModelChunk{Text: ev.Content})
 					// NB: unlike claudecode (which resets finalText on
 					// every tool_use to drop draft text), this provider
 					// accumulates all assistant text. If gemini-cli is
 					// ever observed producing the draft → tool → rewrite
 					// pattern (see bridle.ProviderResult.FinalText doc),
-					// mirror claudecode's reset here.
-					finalText += ev.Content
-					sessionDelta = append(sessionDelta, bridle.SessionEvent{
-						Provider: providerID,
-						Role:     bridle.RoleAssistant,
-						Content:  ev.Content,
-					})
+					// mirror claudecode's reset before the helper call.
+					bridle.EmitAssistantText(sink, &finalText, &sessionDelta, providerID, ev.Content)
 				}
 				// User echoes are recorded but not re-emitted; the funnel already has them.
 			}
