@@ -52,12 +52,18 @@ type TurnError struct {
 type ProviderErrorKind string
 
 const (
-	ProviderErrorAuthFailed   ProviderErrorKind = "auth_failed"
-	ProviderErrorRateLimit    ProviderErrorKind = "rate_limit"
-	ProviderErrorServerError  ProviderErrorKind = "server_error"
-	ProviderErrorNetworkError ProviderErrorKind = "network_error"
-	ProviderErrorTimeout      ProviderErrorKind = "timeout"
-	ProviderErrorTLSError     ProviderErrorKind = "tls_error"
+	ProviderErrorAuthFailed     ProviderErrorKind = "auth_failed"
+	ProviderErrorRateLimit      ProviderErrorKind = "rate_limit"
+	ProviderErrorServerError    ProviderErrorKind = "server_error"
+	ProviderErrorNetworkError   ProviderErrorKind = "network_error"
+	ProviderErrorTimeout        ProviderErrorKind = "timeout"
+	ProviderErrorTLSError       ProviderErrorKind = "tls_error"
+	// ProviderErrorSubprocessExit is the fallback kind used when a
+	// subprocess-style provider exited non-zero and no other
+	// classification matched. Callers can filter for this via
+	// IsProviderErrorKind to handle the generic-failure case
+	// distinctly from the more specific classes above.
+	ProviderErrorSubprocessExit ProviderErrorKind = "subprocess_exit"
 )
 
 // ProviderError is a classified provider-level error.

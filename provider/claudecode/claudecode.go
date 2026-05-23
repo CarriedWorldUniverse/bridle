@@ -845,7 +845,7 @@ func classifyProviderError(stderr string, waitErr error) *bridle.ProviderError {
 		}
 	}
 	return &bridle.ProviderError{
-		Kind:    "subprocess_exit",
+		Kind:    bridle.ProviderErrorSubprocessExit,
 		Message: "claude-code: subprocess exited with error",
 		Err:     waitErr,
 	}
