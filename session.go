@@ -32,7 +32,7 @@ func ParseSessionEvent(e SessionEvent) (NormalizedSessionEvent, error) {
 	}
 	// Provider-specific RawJSON parsing.
 	switch e.Provider {
-	case ProviderClaude, "claude-code":
+	case ProviderClaude, ProviderClaudeCode:
 		// Both Anthropic providers use the same block shape.
 		var block struct {
 			Type  string `json:"type"`

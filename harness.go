@@ -13,13 +13,14 @@ var ErrModelRequired = errors.New("bridle: TurnRequest.Model is required")
 type ProviderID string
 
 const (
-	ProviderClaude    ProviderID = "claude-api"
-	ProviderClaudePty ProviderID = "claude-pty"
-	ProviderOllama    ProviderID = "ollama-local"
-	ProviderOpenAI    ProviderID = "openai-api"
-	ProviderBedrock   ProviderID = "bedrock"
-	ProviderGemini    ProviderID = "gemini-api"
-	ProviderGeminiCLI ProviderID = "gemini-cli"
+	ProviderClaude     ProviderID = "claude-api"
+	ProviderClaudeCode ProviderID = "claude-code"
+	ProviderClaudePty  ProviderID = "claude-pty"
+	ProviderOllama     ProviderID = "ollama-local"
+	ProviderOpenAI     ProviderID = "openai-api"
+	ProviderBedrock    ProviderID = "bedrock"
+	ProviderGemini     ProviderID = "gemini-api"
+	ProviderGeminiCLI  ProviderID = "gemini-cli"
 )
 
 // StopReason explains why a turn ended.
