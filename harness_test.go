@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"testing"
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
@@ -284,6 +285,139 @@ func TestHooks_OnTurnDoneCanMutateSessionDelta(t *testing.T) {
 	last := result.SessionDelta[len(result.SessionDelta)-1]
 	if last.Content != "hook-injected" {
 		t.Errorf("last session delta = %q; want hook-injected", last.Content)
+	}
+}
+
+// inspectingProvider records the ProviderRequest fields the harness
+// passed in, so a test can assert what reached RunTurn.
+type inspectingProvider struct {
+	requests []bridle.ProviderRequest
+}
+
+func (p *inspectingProvider) Name() bridle.ProviderID { return "inspecting" }
+func (p *inspectingProvider) Capabilities() bridle.ProviderCapabilities {
+	return bridle.ProviderCapabilities{
+		Category:            bridle.CategoryDirectAPI,
+		SupportsCustomTools: true,
+	}
+}
+func (p *inspectingProvider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink bridle.EventSink) (bridle.ProviderResult, error) {
+	// Copy the slices we care about so subsequent harness mutations
+	// don't backfill what we recorded.
+	cp := req
+	cp.Messages = append([]bridle.ProviderMessage(nil), req.Messages...)
+	cp.Tools = append([]bridle.ToolDef(nil), req.Tools...)
+	p.requests = append(p.requests, cp)
+	return bridle.ProviderResult{StopReason: bridle.StopReasonModelDone}, nil
+}
+
+func TestHooks_BeforeModelCall_MutationReachesProvider(t *testing.T) {
+	p := &inspectingProvider{}
+	h := bridle.NewHarness(p)
+	h.RegisterBeforeModelCall(func(ctx context.Context, in bridle.BeforeModelCallCtx) (bridle.BeforeModelCallCtx, bridle.HookAction, error) {
+		in.Request.Model = "rewritten-by-hook"
+		in.Request.AppendSystemPrompt = "extra-system-text"
+		in.Request.Messages = append(in.Request.Messages, bridle.ProviderMessage{
+			Role:    "user",
+			Content: "hook-injected",
+		})
+		return in, bridle.HookContinue, nil
+	})
+
+	_, err := h.RunTurn(context.Background(), bridle.TurnRequest{
+		Model:       "fake-model",
+		UserMessage: "hi",
+	}, fake.NewToolRunner(nil), &fake.SliceEventSink{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(p.requests) != 1 {
+		t.Fatalf("provider called %d times; want 1", len(p.requests))
+	}
+	got := p.requests[0]
+	if got.Model != "rewritten-by-hook" {
+		t.Errorf("Model = %q; want rewritten-by-hook (hook mutation dropped)", got.Model)
+	}
+	if got.AppendSystemPrompt != "extra-system-text" {
+		t.Errorf("AppendSystemPrompt = %q; want extra-system-text", got.AppendSystemPrompt)
+	}
+	// Original UserMessage was lowered into Messages; hook appended one more.
+	if len(got.Messages) < 2 || got.Messages[len(got.Messages)-1].Content != "hook-injected" {
+		t.Errorf("last message = %+v; want hook-injected", got.Messages)
+	}
+}
+
+// scriptedInspectingProvider returns a scripted sequence of results
+// while also recording the ProviderRequest received at each call.
+type scriptedInspectingProvider struct {
+	steps    []fake.Step
+	pos      int
+	requests []bridle.ProviderRequest
+}
+
+func (p *scriptedInspectingProvider) Name() bridle.ProviderID { return "scripted-inspecting" }
+func (p *scriptedInspectingProvider) Capabilities() bridle.ProviderCapabilities {
+	return bridle.ProviderCapabilities{
+		Category:            bridle.CategoryDirectAPI,
+		SupportsCustomTools: true,
+	}
+}
+func (p *scriptedInspectingProvider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink bridle.EventSink) (bridle.ProviderResult, error) {
+	cp := req
+	cp.Model = req.Model // explicit; req is value already
+	p.requests = append(p.requests, cp)
+
+	if p.pos >= len(p.steps) {
+		return bridle.ProviderResult{StopReason: bridle.StopReasonModelDone}, nil
+	}
+	step := p.steps[p.pos]
+	p.pos++
+	return bridle.ProviderResult{
+		FinalText:  step.Text,
+		ToolCalls:  step.ToolCalls,
+		StopReason: bridle.StopReasonModelDone,
+	}, nil
+}
+
+func TestHooks_BeforeModelCall_InLoopMutationReachesProvider(t *testing.T) {
+	// First call returns a tool_use to drive a second call; second
+	// call returns final text. The hook mutates Model on every fire
+	// and we assert call N+1 saw the mutation from hook fire N.
+	p := &scriptedInspectingProvider{
+		steps: []fake.Step{
+			{ToolCalls: []bridle.ToolInvocation{inv("1", "echo")}},
+			{Text: "done"},
+		},
+	}
+	h := bridle.NewHarness(p)
+	var fireCount int
+	h.RegisterBeforeModelCall(func(ctx context.Context, in bridle.BeforeModelCallCtx) (bridle.BeforeModelCallCtx, bridle.HookAction, error) {
+		fireCount++
+		in.Request.Model = "rewritten-call-" + strconv.Itoa(fireCount)
+		return in, bridle.HookContinue, nil
+	})
+
+	runner := fake.NewToolRunner(map[string][]fake.ToolResult{
+		"echo": {{Result: rawJSON(`"ok"`)}},
+	})
+	_, err := h.RunTurn(context.Background(), bridle.TurnRequest{
+		Model:    "fake-model",
+		Tools:    []bridle.ToolDef{toolDef("echo")},
+		MaxSteps: 5,
+	}, runner, &fake.SliceEventSink{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(p.requests) != 2 {
+		t.Fatalf("provider called %d times; want 2", len(p.requests))
+	}
+	if p.requests[0].Model != "rewritten-call-1" {
+		t.Errorf("call 1 Model = %q; want rewritten-call-1", p.requests[0].Model)
+	}
+	if p.requests[1].Model != "rewritten-call-2" {
+		t.Errorf("call 2 Model = %q; want rewritten-call-2 (in-loop mutation dropped)", p.requests[1].Model)
 	}
 }
 
