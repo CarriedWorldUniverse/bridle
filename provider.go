@@ -88,6 +88,26 @@ type ProviderMessage struct {
 }
 
 // ProviderResult is the harness-internal result from one provider turn step.
+//
+// FinalText is the model's settled assistant text for this round —
+// what downstream consumers (e.g. nexus funnel auto-post to chat)
+// should treat as "what the model said." The harness concatenates
+// FinalText across rounds for direct-API providers (see run.go),
+// because each round is a separate, intentional deliberation.
+//
+// Subprocess-stream providers that parse multi-event streams must
+// decide what counts as "settled" before populating FinalText. Some
+// models (Claude trained for claudecode) produce a draft → tool → final
+// answer pattern within one subprocess run; the draft is exploratory
+// and should NOT survive into FinalText, or auto-post emits a doubled
+// "draft + rewrite" row (operator chat #951, harrow #944). claudecode
+// handles this by resetting accumulated text on every tool_use, so
+// FinalText ends up containing only post-last-tool text.
+//
+// Other subprocess-stream providers (geminicli) don't currently apply
+// the same heuristic — that's an explicit per-model judgement, not a
+// missed fix. Revisit if a model exhibits the draft-rewrite pattern
+// without this policy.
 type ProviderResult struct {
 	FinalText    string
 	ToolCalls    []ToolInvocation
