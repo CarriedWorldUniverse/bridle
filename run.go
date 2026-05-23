@@ -3,7 +3,6 @@ package bridle
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 
 	"github.com/CarriedWorldUniverse/bridle/internal/mcpclient"
@@ -117,71 +116,16 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 		// Execute each tool call.
 		var toolMessages []ProviderMessage
 		for _, inv := range presult.ToolCalls {
-			call := ToolCall{ID: inv.ID, Name: inv.Name, Args: inv.Args}
-
-			// BeforeToolCall hook.
-			btc := BeforeToolCallCtx{Call: call, Step: stepCount + 1}
-			btc, aborted, herr = h.hooks.runBeforeToolCall(ctx, btc)
-			if herr != nil {
-				return partialAbortWith(finalText, allInvocations, stepCount, totalUsage), herr
+			toolMsg, completed, abortedExec, execErr := h.executeToolCall(ctx, inv, stepCount, runner, mcpClient, sink)
+			if execErr != nil {
+				return partialAbortWith(finalText, allInvocations, stepCount, totalUsage), execErr
 			}
-			if aborted {
+			if abortedExec {
 				return partialAbortWith(finalText, allInvocations, stepCount, totalUsage), nil
-			}
-			call = btc.Call
-
-			sink.Emit(ToolCallStart{ID: call.ID, Name: call.Name, Args: call.Args})
-
-			if ctx.Err() != nil {
-				return partialAbortWith(finalText, allInvocations, stepCount, totalUsage), nil
-			}
-
-			var resultJSON json.RawMessage
-			var runErr error
-			if mcpClient != nil && mcpClient.IsMCPTool(call.Name) {
-				resultJSON, runErr = mcpClient.Call(ctx, call.Name, call.Args)
-			} else {
-				resultJSON, runErr = runner.Run(ctx, call)
-			}
-			var toolErrStr string
-			if runErr != nil {
-				toolErrStr = runErr.Error()
-				resultJSON = json.RawMessage(`null`)
-			}
-
-			tcr := ToolCallResult{ID: call.ID, Result: resultJSON, Err: toolErrStr}
-			sink.Emit(tcr)
-
-			// AfterToolCall hook.
-			atc := AfterToolCallCtx{Call: call, Result: tcr, Step: stepCount + 1}
-			atc, aborted, herr = h.hooks.runAfterToolCall(ctx, atc)
-			if herr != nil {
-				return partialAbortWith(finalText, allInvocations, stepCount, totalUsage), herr
-			}
-			if aborted {
-				return partialAbortWith(finalText, allInvocations, stepCount, totalUsage), nil
-			}
-
-			completed := ToolInvocation{
-				ID:     call.ID,
-				Name:   call.Name,
-				Args:   call.Args,
-				Result: atc.Result.Result,
-				Err:    atc.Result.Err,
 			}
 			allInvocations = append(allInvocations, completed)
-
-			resultStr := string(atc.Result.Result)
-			if atc.Result.Err != "" {
-				resultStr = fmt.Sprintf("error: %s", atc.Result.Err)
-			}
-			toolMessages = append(toolMessages, ProviderMessage{
-				Role:       "tool_result",
-				Content:    resultStr,
-				ToolCallID: call.ID,
-				ToolName:   call.Name, // required by Gemini's FunctionResponse contract; ignored by other providers
-			})
-			sessionDelta = append(sessionDelta, SessionEvent{Provider: h.provider.Name(), Role: RoleTool, Content: resultStr})
+			toolMessages = append(toolMessages, toolMsg)
+			sessionDelta = append(sessionDelta, SessionEvent{Provider: h.provider.Name(), Role: RoleTool, Content: toolMsg.Content})
 		}
 
 		stepCount++
@@ -245,6 +189,83 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 	h.hooks.runOnTurnDone(ctx, otd) //nolint:errcheck
 	sink.Emit(TurnDone{Result: result})
 	return result, nil
+}
+
+// executeToolCall runs one tool invocation through the BeforeToolCall →
+// runner/MCP dispatch → AfterToolCall pipeline. Returns the resulting
+// tool_result ProviderMessage to append to the next request, the
+// completed ToolInvocation to record in allInvocations, an aborted
+// flag (true when a hook returned HookAbort or ctx was cancelled
+// mid-call), and any hook error. Runner-level errors are captured
+// onto the ToolCallResult and don't return err — the model should see
+// the error string and decide what to do.
+func (h *Harness) executeToolCall(
+	ctx context.Context,
+	inv ToolInvocation,
+	stepCount int,
+	runner ToolRunner,
+	mcpClient *mcpclient.Client,
+	sink EventSink,
+) (toolMsg ProviderMessage, completed ToolInvocation, aborted bool, err error) {
+	call := ToolCall{ID: inv.ID, Name: inv.Name, Args: inv.Args}
+
+	// BeforeToolCall hook.
+	btc := BeforeToolCallCtx{Call: call, Step: stepCount + 1}
+	btc, aborted, err = h.hooks.runBeforeToolCall(ctx, btc)
+	if err != nil || aborted {
+		return
+	}
+	call = btc.Call
+
+	sink.Emit(ToolCallStart{ID: call.ID, Name: call.Name, Args: call.Args})
+
+	if ctx.Err() != nil {
+		aborted = true
+		return
+	}
+
+	var resultJSON json.RawMessage
+	var runErr error
+	if mcpClient != nil && mcpClient.IsMCPTool(call.Name) {
+		resultJSON, runErr = mcpClient.Call(ctx, call.Name, call.Args)
+	} else {
+		resultJSON, runErr = runner.Run(ctx, call)
+	}
+	var toolErrStr string
+	if runErr != nil {
+		toolErrStr = runErr.Error()
+		resultJSON = json.RawMessage(`null`)
+	}
+
+	tcr := ToolCallResult{ID: call.ID, Result: resultJSON, Err: toolErrStr}
+	sink.Emit(tcr)
+
+	// AfterToolCall hook.
+	atc := AfterToolCallCtx{Call: call, Result: tcr, Step: stepCount + 1}
+	atc, aborted, err = h.hooks.runAfterToolCall(ctx, atc)
+	if err != nil || aborted {
+		return
+	}
+
+	completed = ToolInvocation{
+		ID:     call.ID,
+		Name:   call.Name,
+		Args:   call.Args,
+		Result: atc.Result.Result,
+		Err:    atc.Result.Err,
+	}
+
+	resultStr := string(atc.Result.Result)
+	if atc.Result.Err != "" {
+		resultStr = fmt.Sprintf("error: %s", atc.Result.Err)
+	}
+	toolMsg = ProviderMessage{
+		Role:       "tool_result",
+		Content:    resultStr,
+		ToolCallID: call.ID,
+		ToolName:   call.Name, // required by Gemini's FunctionResponse contract; ignored by other providers
+	}
+	return
 }
 
 func lowerRequest(req TurnRequest) ProviderRequest {
@@ -320,7 +341,7 @@ func panicErr(r any) error {
 	if err, ok := r.(error); ok {
 		return err
 	}
-	return errors.New(fmt.Sprintf("panic: %v", r))
+	return fmt.Errorf("panic: %v", r)
 }
 
 // lowerMCPConfig converts a bridle MCPClientConfig to the internal mcpclient ServerSpec slice.
