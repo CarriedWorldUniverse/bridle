@@ -56,7 +56,10 @@ func (p *Provider) getClient() *anthropic.Client {
 	return p.client
 }
 
-// RunTurn calls the Claude Messages API and emits bridle events to sink.
+// RunTurn calls the Claude Messages API in streaming mode and emits
+// bridle events to sink. Streams TextDelta events live so the funnel/UI
+// can paint as the model speaks; accumulates into a Message via the
+// SDK's Accumulate helper and extracts the final result post-stream.
 func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink bridle.EventSink) (bridle.ProviderResult, error) {
 	messages, err := toClaudeMessages(req.Messages)
 	if err != nil {
@@ -82,15 +85,35 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		params.Tools = tools
 	}
 
-	msg, err := p.getClient().Messages.New(ctx, params)
-	if err != nil {
+	stream := p.getClient().Messages.NewStreaming(ctx, params)
+	var msg anthropic.Message
+	for stream.Next() {
+		event := stream.Current()
+		if accErr := msg.Accumulate(event); accErr != nil {
+			return bridle.ProviderResult{}, fmt.Errorf("claude: accumulate stream event: %w", accErr)
+		}
+		// Emit TextDelta chunks live so callers can paint as they arrive.
+		// Other delta types (InputJSONDelta for tool args, etc.) are
+		// captured by Accumulate but not surfaced as ModelChunks — those
+		// would be misinterpreted as model prose.
+		if delta, ok := event.AsAny().(anthropic.ContentBlockDeltaEvent); ok {
+			if td, ok := delta.Delta.AsAny().(anthropic.TextDelta); ok {
+				sink.Emit(bridle.ModelChunk{Text: td.Text})
+			}
+		}
+	}
+	if err := stream.Err(); err != nil {
 		return bridle.ProviderResult{}, fmt.Errorf("claude: API error: %w", err)
 	}
 
-	return extractResult(msg, sink)
+	return extractResult(&msg, sink, true /*streamed*/)
 }
 
-func extractResult(msg *anthropic.Message, sink bridle.EventSink) (bridle.ProviderResult, error) {
+// extractResult pulls finalText/toolCalls/usage out of an Anthropic
+// Message. When streamed=true the caller has already emitted ModelChunks
+// during the stream, so this skips the per-block sink.Emit to avoid
+// double-painting.
+func extractResult(msg *anthropic.Message, sink bridle.EventSink, streamed bool) (bridle.ProviderResult, error) {
 	var finalText string
 	var toolCalls []bridle.ToolInvocation
 	var sessionDelta []bridle.SessionEvent
@@ -98,7 +121,9 @@ func extractResult(msg *anthropic.Message, sink bridle.EventSink) (bridle.Provid
 	for _, block := range msg.Content {
 		switch b := block.AsAny().(type) {
 		case anthropic.TextBlock:
-			sink.Emit(bridle.ModelChunk{Text: b.Text})
+			if !streamed {
+				sink.Emit(bridle.ModelChunk{Text: b.Text})
+			}
 			finalText += b.Text
 			sessionDelta = append(sessionDelta, bridle.SessionEvent{
 				Provider: bridle.ProviderClaude,

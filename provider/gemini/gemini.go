@@ -86,7 +86,11 @@ func (p *Provider) getClient(ctx context.Context) (*genai.Client, error) {
 	return p.client, nil
 }
 
-// RunTurn calls the Gemini GenerateContent API and emits bridle events to sink.
+// RunTurn calls the Gemini GenerateContentStream API and emits bridle
+// events to sink. Streams text part deltas live so the funnel/UI can
+// paint as the model speaks; assembles parts/finish-reason/usage into
+// an aggregate GenerateContentResponse and runs extractResult on it
+// post-stream.
 func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink bridle.EventSink) (bridle.ProviderResult, error) {
 	client, err := p.getClient(ctx)
 	if err != nil {
@@ -105,15 +109,51 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		cfg.Tools = tools
 	}
 
-	resp, err := client.Models.GenerateContent(ctx, req.Model, contents, cfg)
-	if err != nil {
-		return bridle.ProviderResult{}, fmt.Errorf("gemini: API error: %w", err)
+	// Stream yields partial GenerateContentResponses; each chunk's
+	// Candidates[0].Content.Parts contains only the NEW parts (text
+	// delta, function_call when assembled). We emit text deltas live
+	// and accumulate parts/finish-reason/usage into one synthetic
+	// response that extractResult can lower as if non-streamed.
+	agg := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{{
+			Content: &genai.Content{Parts: nil},
+		}},
+	}
+	for resp, streamErr := range client.Models.GenerateContentStream(ctx, req.Model, contents, cfg) {
+		if streamErr != nil {
+			return bridle.ProviderResult{}, fmt.Errorf("gemini: API error: %w", streamErr)
+		}
+		if resp == nil || len(resp.Candidates) == 0 {
+			continue
+		}
+		cand := resp.Candidates[0]
+		if cand.Content != nil {
+			for _, part := range cand.Content.Parts {
+				if part == nil {
+					continue
+				}
+				if part.Text != "" {
+					sink.Emit(bridle.ModelChunk{Text: part.Text})
+				}
+				agg.Candidates[0].Content.Parts = append(agg.Candidates[0].Content.Parts, part)
+			}
+		}
+		if cand.FinishReason != "" {
+			agg.Candidates[0].FinishReason = cand.FinishReason
+		}
+		if resp.UsageMetadata != nil {
+			agg.UsageMetadata = resp.UsageMetadata
+		}
 	}
 
-	return extractResult(resp, sink)
+	return extractResult(agg, sink, true /*streamed*/)
 }
 
-func extractResult(resp *genai.GenerateContentResponse, sink bridle.EventSink) (bridle.ProviderResult, error) {
+// extractResult builds a bridle.ProviderResult from an aggregate Gemini
+// GenerateContentResponse. When streamed=true the caller has already
+// emitted ModelChunks during the stream, so this skips re-emit to avoid
+// double-painting.
+func extractResult(resp *genai.GenerateContentResponse, sink bridle.EventSink, streamed bool) (bridle.ProviderResult, error) {
 	if resp == nil || len(resp.Candidates) == 0 {
 		return bridle.ProviderResult{StopReason: bridle.StopReasonModelDone}, nil
 	}
@@ -129,7 +169,9 @@ func extractResult(resp *genai.GenerateContentResponse, sink bridle.EventSink) (
 				continue
 			}
 			if part.Text != "" {
-				sink.Emit(bridle.ModelChunk{Text: part.Text})
+				if !streamed {
+					sink.Emit(bridle.ModelChunk{Text: part.Text})
+				}
 				finalText += part.Text
 				raw, _ := json.Marshal(map[string]any{"text": part.Text})
 				sessionDelta = append(sessionDelta, bridle.SessionEvent{

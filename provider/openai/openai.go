@@ -58,7 +58,11 @@ func (p *Provider) getClient() *openai.Client {
 	return p.client
 }
 
-// RunTurn calls the OpenAI Chat Completions API and emits bridle events to sink.
+// RunTurn calls the OpenAI Chat Completions API in streaming mode and
+// emits bridle events to sink. Streams content deltas live so the
+// funnel/UI can paint as the model speaks; uses the SDK's
+// ChatCompletionAccumulator to assemble the final ChatCompletion for
+// post-stream result extraction.
 func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink bridle.EventSink) (bridle.ProviderResult, error) {
 	messages := toOpenAIMessages(req.AppendSystemPrompt, req.Messages)
 	tools := toOpenAITools(req.Tools)
@@ -71,15 +75,30 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		params.Tools = tools
 	}
 
-	completion, err := p.getClient().Chat.Completions.New(ctx, params)
-	if err != nil {
+	stream := p.getClient().Chat.Completions.NewStreaming(ctx, params)
+	acc := openai.ChatCompletionAccumulator{}
+	for stream.Next() {
+		chunk := stream.Current()
+		if !acc.AddChunk(chunk) {
+			return bridle.ProviderResult{}, fmt.Errorf("openai: accumulator rejected chunk")
+		}
+		// Emit content deltas live; tool-call argument deltas are
+		// captured by the accumulator but not surfaced as ModelChunks.
+		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
+			sink.Emit(bridle.ModelChunk{Text: chunk.Choices[0].Delta.Content})
+		}
+	}
+	if err := stream.Err(); err != nil {
 		return bridle.ProviderResult{}, fmt.Errorf("openai: API error: %w", err)
 	}
 
-	return extractResult(completion, sink)
+	return extractResult(&acc.ChatCompletion, sink, true /*streamed*/)
 }
 
-func extractResult(completion *openai.ChatCompletion, sink bridle.EventSink) (bridle.ProviderResult, error) {
+// extractResult pulls finalText/toolCalls/usage out of a ChatCompletion.
+// When streamed=true the caller has already emitted ModelChunks during
+// the stream, so this skips the sink.Emit to avoid double-painting.
+func extractResult(completion *openai.ChatCompletion, sink bridle.EventSink, streamed bool) (bridle.ProviderResult, error) {
 	if len(completion.Choices) == 0 {
 		return bridle.ProviderResult{StopReason: bridle.StopReasonModelDone}, nil
 	}
@@ -92,7 +111,9 @@ func extractResult(completion *openai.ChatCompletion, sink bridle.EventSink) (br
 	var sessionDelta []bridle.SessionEvent
 
 	if msg.Content != "" {
-		sink.Emit(bridle.ModelChunk{Text: msg.Content})
+		if !streamed {
+			sink.Emit(bridle.ModelChunk{Text: msg.Content})
+		}
 		finalText = msg.Content
 		sessionDelta = append(sessionDelta, bridle.SessionEvent{
 			Provider: bridle.ProviderOpenAI,

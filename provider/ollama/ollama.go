@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/ollama/ollama/api"
 
@@ -72,7 +73,7 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 	messages := toOllamaMessages(req.Messages)
 	tools := toOllamaTools(req.Tools)
 
-	stream := false
+	stream := true
 	chatReq := &api.ChatRequest{
 		Model:    req.Model,
 		Messages: messages,
@@ -86,11 +87,19 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		}, chatReq.Messages...)
 	}
 
-	var finalResp api.ChatResponse
+	// In streaming mode the callback fires once per chunk: each
+	// Message.Content carries only the new delta, not the full text.
+	// We emit deltas live, accumulate the full text ourselves, and use
+	// the final (Done=true) callback for tool_calls + done_reason.
+	var (
+		finalResp     api.ChatResponse
+		accumulatedTx strings.Builder
+	)
 	err = client.Chat(ctx, chatReq, func(resp api.ChatResponse) error {
 		finalResp = resp
 		if resp.Message.Content != "" {
 			sink.Emit(bridle.ModelChunk{Text: resp.Message.Content})
+			accumulatedTx.WriteString(resp.Message.Content)
 		}
 		return nil
 	})
@@ -98,6 +107,10 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		return bridle.ProviderResult{}, fmt.Errorf("ollama: Chat error: %w", err)
 	}
 
+	// Overwrite the (delta-only) Content on the final response with the
+	// accumulated text before lowering — extractResult reads it as the
+	// model's full reply.
+	finalResp.Message.Content = accumulatedTx.String()
 	return extractResult(finalResp), nil
 }
 
