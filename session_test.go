@@ -30,8 +30,8 @@ func TestParseSessionEvent_PerProviderRawJSON(t *testing.T) {
 			want:     `tool_use: send_chat {"content":"hi"}`,
 		},
 		{
-			name:     "claudecode tool_use block (string-keyed provider)",
-			provider: "claude-code",
+			name:     "claudecode tool_use block",
+			provider: bridle.ProviderClaudeCode,
 			raw:      `{"type":"tool_use","id":"abc","name":"Bash","input":{"command":"ls"}}`,
 			want:     `tool_use: Bash {"command":"ls"}`,
 		},

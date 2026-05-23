@@ -31,7 +31,7 @@ import (
 	"github.com/CarriedWorldUniverse/bridle/internal/normalize"
 )
 
-const providerID bridle.ProviderID = "claude-code"
+const providerID = bridle.ProviderClaudeCode
 
 // systemPromptSpillThresholdBytes is the body length above which we write
 // the system prompt to a tempfile and pass --append-system-prompt-file
