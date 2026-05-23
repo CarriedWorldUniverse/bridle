@@ -7,12 +7,22 @@ type HookAction int
 
 const (
 	HookContinue HookAction = iota
-	HookAbort                // end the turn; partial TurnResult returned with StopReason=aborted
+	HookAbort               // end the turn; partial TurnResult returned with StopReason=aborted
 )
 
 // Hook is the generic hook signature. T is the mutable context value passed
 // in and returned. Registration order is the execution order.
 type Hook[T any] func(ctx context.Context, in T) (T, HookAction, error)
+
+// HookID identifies a registered hook so it can be removed via
+// Harness.UnregisterHook. The zero value is not a valid hook id —
+// every successful Register* call returns a non-zero id.
+//
+// Hook registration is NOT safe to call concurrently with RunTurn or
+// with itself; mirror the existing assumption that hooks are wired
+// during setup. If you need to swap a hook between turns, do it from
+// a single goroutine while no turn is in flight.
+type HookID uint64
 
 // BeforeModelCallCtx carries context passed to BeforeModelCall hooks.
 //
@@ -62,45 +72,130 @@ type OnTurnDoneCtx struct {
 	Result *TurnResult
 }
 
+// hookEntry binds a registered hook to its id so UnregisterHook can
+// find and remove it.
+type hookEntry[T any] struct {
+	id HookID
+	fn Hook[T]
+}
+
 // hookRegistry holds all registered hooks for a Harness instance.
 type hookRegistry struct {
-	beforeModelCall  []Hook[BeforeModelCallCtx]
-	afterModelChunk  []Hook[AfterModelChunkCtx]
-	beforeToolCall   []Hook[BeforeToolCallCtx]
-	afterToolCall    []Hook[AfterToolCallCtx]
-	onStepBoundary   []Hook[OnStepBoundaryCtx]
-	onTurnDone       []Hook[OnTurnDoneCtx]
+	nextID           HookID
+	beforeModelCall  []hookEntry[BeforeModelCallCtx]
+	afterModelChunk  []hookEntry[AfterModelChunkCtx]
+	beforeToolCall   []hookEntry[BeforeToolCallCtx]
+	afterToolCall    []hookEntry[AfterToolCallCtx]
+	onStepBoundary   []hookEntry[OnStepBoundaryCtx]
+	onTurnDone       []hookEntry[OnTurnDoneCtx]
 }
 
-// RegisterBeforeModelCall adds a hook that fires before each model invocation.
-func (h *Harness) RegisterBeforeModelCall(fn Hook[BeforeModelCallCtx]) {
-	h.hooks.beforeModelCall = append(h.hooks.beforeModelCall, fn)
+func (r *hookRegistry) newID() HookID {
+	r.nextID++
+	return r.nextID
 }
 
-// RegisterAfterModelChunk adds a hook that fires on each ModelChunk event.
-func (h *Harness) RegisterAfterModelChunk(fn Hook[AfterModelChunkCtx]) {
-	h.hooks.afterModelChunk = append(h.hooks.afterModelChunk, fn)
+// RegisterBeforeModelCall adds a hook that fires before each model
+// invocation. Returns a HookID that can be passed to UnregisterHook.
+func (h *Harness) RegisterBeforeModelCall(fn Hook[BeforeModelCallCtx]) HookID {
+	id := h.hooks.newID()
+	h.hooks.beforeModelCall = append(h.hooks.beforeModelCall, hookEntry[BeforeModelCallCtx]{id, fn})
+	return id
 }
 
-// RegisterBeforeToolCall adds a hook that fires before each tool execution.
-func (h *Harness) RegisterBeforeToolCall(fn Hook[BeforeToolCallCtx]) {
-	h.hooks.beforeToolCall = append(h.hooks.beforeToolCall, fn)
+// RegisterAfterModelChunk adds a hook that fires on each ModelChunk
+// event. Returns a HookID that can be passed to UnregisterHook.
+func (h *Harness) RegisterAfterModelChunk(fn Hook[AfterModelChunkCtx]) HookID {
+	id := h.hooks.newID()
+	h.hooks.afterModelChunk = append(h.hooks.afterModelChunk, hookEntry[AfterModelChunkCtx]{id, fn})
+	return id
 }
 
-// RegisterAfterToolCall adds a hook that fires after each tool execution.
-func (h *Harness) RegisterAfterToolCall(fn Hook[AfterToolCallCtx]) {
-	h.hooks.afterToolCall = append(h.hooks.afterToolCall, fn)
+// RegisterBeforeToolCall adds a hook that fires before each tool
+// execution. Returns a HookID that can be passed to UnregisterHook.
+func (h *Harness) RegisterBeforeToolCall(fn Hook[BeforeToolCallCtx]) HookID {
+	id := h.hooks.newID()
+	h.hooks.beforeToolCall = append(h.hooks.beforeToolCall, hookEntry[BeforeToolCallCtx]{id, fn})
+	return id
 }
 
-// RegisterOnStepBoundary adds a hook that fires between tool-call rounds.
-func (h *Harness) RegisterOnStepBoundary(fn Hook[OnStepBoundaryCtx]) {
-	h.hooks.onStepBoundary = append(h.hooks.onStepBoundary, fn)
+// RegisterAfterToolCall adds a hook that fires after each tool
+// execution. Returns a HookID that can be passed to UnregisterHook.
+func (h *Harness) RegisterAfterToolCall(fn Hook[AfterToolCallCtx]) HookID {
+	id := h.hooks.newID()
+	h.hooks.afterToolCall = append(h.hooks.afterToolCall, hookEntry[AfterToolCallCtx]{id, fn})
+	return id
+}
+
+// RegisterOnStepBoundary adds a hook that fires between tool-call
+// rounds. Returns a HookID that can be passed to UnregisterHook.
+func (h *Harness) RegisterOnStepBoundary(fn Hook[OnStepBoundaryCtx]) HookID {
+	id := h.hooks.newID()
+	h.hooks.onStepBoundary = append(h.hooks.onStepBoundary, hookEntry[OnStepBoundaryCtx]{id, fn})
+	return id
 }
 
 // RegisterOnTurnDone adds a hook that fires after the turn completes.
-// Hooks may mutate TurnResult.SessionDelta.
-func (h *Harness) RegisterOnTurnDone(fn Hook[OnTurnDoneCtx]) {
-	h.hooks.onTurnDone = append(h.hooks.onTurnDone, fn)
+// Hooks may mutate TurnResult.SessionDelta. Returns a HookID that can
+// be passed to UnregisterHook.
+func (h *Harness) RegisterOnTurnDone(fn Hook[OnTurnDoneCtx]) HookID {
+	id := h.hooks.newID()
+	h.hooks.onTurnDone = append(h.hooks.onTurnDone, hookEntry[OnTurnDoneCtx]{id, fn})
+	return id
+}
+
+// UnregisterHook removes the hook with the given id from whichever
+// hook slice it was registered into. Returns true if a hook was
+// removed, false if no hook with that id exists. The zero HookID is
+// never registered and always returns false.
+//
+// Not safe to call concurrently with RunTurn or with Register*. See
+// HookID for the threading contract.
+func (h *Harness) UnregisterHook(id HookID) bool {
+	if id == 0 {
+		return false
+	}
+	r := &h.hooks
+	if next, ok := removeHookByID(r.beforeModelCall, id); ok {
+		r.beforeModelCall = next
+		return true
+	}
+	if next, ok := removeHookByID(r.afterModelChunk, id); ok {
+		r.afterModelChunk = next
+		return true
+	}
+	if next, ok := removeHookByID(r.beforeToolCall, id); ok {
+		r.beforeToolCall = next
+		return true
+	}
+	if next, ok := removeHookByID(r.afterToolCall, id); ok {
+		r.afterToolCall = next
+		return true
+	}
+	if next, ok := removeHookByID(r.onStepBoundary, id); ok {
+		r.onStepBoundary = next
+		return true
+	}
+	if next, ok := removeHookByID(r.onTurnDone, id); ok {
+		r.onTurnDone = next
+		return true
+	}
+	return false
+}
+
+// removeHookByID returns a new slice with the entry matching id
+// removed, along with a flag indicating whether removal happened. The
+// original slice is not mutated.
+func removeHookByID[T any](entries []hookEntry[T], id HookID) ([]hookEntry[T], bool) {
+	for i, e := range entries {
+		if e.id == id {
+			out := make([]hookEntry[T], 0, len(entries)-1)
+			out = append(out, entries[:i]...)
+			out = append(out, entries[i+1:]...)
+			return out, true
+		}
+	}
+	return entries, false
 }
 
 // runBeforeModelCall fires all BeforeModelCall hooks in registration order.
@@ -129,10 +224,10 @@ func (r *hookRegistry) runOnTurnDone(ctx context.Context, hc OnTurnDoneCtx) (OnT
 	return runHooks(ctx, hc, r.onTurnDone)
 }
 
-func runHooks[T any](ctx context.Context, in T, hooks []Hook[T]) (T, bool, error) {
+func runHooks[T any](ctx context.Context, in T, hooks []hookEntry[T]) (T, bool, error) {
 	cur := in
 	for _, h := range hooks {
-		out, action, err := h(ctx, cur)
+		out, action, err := h.fn(ctx, cur)
 		if err != nil {
 			return cur, false, err
 		}
