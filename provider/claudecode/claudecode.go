@@ -440,13 +440,7 @@ func parseStream(r io.Reader, sink bridle.EventSink) (parseResult, error) {
 				for _, block := range msg.Message.Content {
 					switch block.Type {
 					case "text":
-						sink.Emit(bridle.ModelChunk{Text: block.Text})
-						finalText += block.Text
-						sessionDelta = append(sessionDelta, bridle.SessionEvent{
-							Provider: providerID,
-							Role:     bridle.RoleAssistant,
-							Content:  block.Text,
-						})
+						bridle.EmitAssistantText(sink, &finalText, &sessionDelta, providerID, block.Text)
 					case "tool_use":
 						// Reset finalText: any assistant text emitted
 						// BEFORE this tool call was pre-tool exploratory

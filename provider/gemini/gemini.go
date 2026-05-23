@@ -146,14 +146,13 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		}
 	}
 
-	return extractResult(agg, sink, true /*streamed*/)
+	return extractResult(agg)
 }
 
 // extractResult builds a bridle.ProviderResult from an aggregate Gemini
-// GenerateContentResponse. When streamed=true the caller has already
-// emitted ModelChunks during the stream, so this skips re-emit to avoid
-// double-painting.
-func extractResult(resp *genai.GenerateContentResponse, sink bridle.EventSink, streamed bool) (bridle.ProviderResult, error) {
+// GenerateContentResponse. Chunks were already emitted live during the
+// stream loop, so this just lowers the assembled response.
+func extractResult(resp *genai.GenerateContentResponse) (bridle.ProviderResult, error) {
 	if resp == nil || len(resp.Candidates) == 0 {
 		return bridle.ProviderResult{StopReason: bridle.StopReasonModelDone}, nil
 	}
@@ -169,9 +168,9 @@ func extractResult(resp *genai.GenerateContentResponse, sink bridle.EventSink, s
 				continue
 			}
 			if part.Text != "" {
-				if !streamed {
-					sink.Emit(bridle.ModelChunk{Text: part.Text})
-				}
+				// Inlined rather than using AppendAssistantText
+				// because gemini also stores a RawJSON snapshot of
+				// the text part (other providers don't).
 				finalText += part.Text
 				raw, _ := json.Marshal(map[string]any{"text": part.Text})
 				sessionDelta = append(sessionDelta, bridle.SessionEvent{

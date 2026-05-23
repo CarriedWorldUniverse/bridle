@@ -106,14 +106,14 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		return bridle.ProviderResult{}, fmt.Errorf("claude: API error: %w", err)
 	}
 
-	return extractResult(&msg, sink, true /*streamed*/)
+	return extractResult(&msg)
 }
 
-// extractResult pulls finalText/toolCalls/usage out of an Anthropic
-// Message. When streamed=true the caller has already emitted ModelChunks
-// during the stream, so this skips the per-block sink.Emit to avoid
-// double-painting.
-func extractResult(msg *anthropic.Message, sink bridle.EventSink, streamed bool) (bridle.ProviderResult, error) {
+// extractResult pulls finalText/toolCalls/usage out of an accumulated
+// Anthropic Message. Chunks were already emitted live during the
+// stream loop, so this just lowers the assembled message into a
+// bridle.ProviderResult.
+func extractResult(msg *anthropic.Message) (bridle.ProviderResult, error) {
 	var finalText string
 	var toolCalls []bridle.ToolInvocation
 	var sessionDelta []bridle.SessionEvent
@@ -121,15 +121,7 @@ func extractResult(msg *anthropic.Message, sink bridle.EventSink, streamed bool)
 	for _, block := range msg.Content {
 		switch b := block.AsAny().(type) {
 		case anthropic.TextBlock:
-			if !streamed {
-				sink.Emit(bridle.ModelChunk{Text: b.Text})
-			}
-			finalText += b.Text
-			sessionDelta = append(sessionDelta, bridle.SessionEvent{
-				Provider: bridle.ProviderClaude,
-				Role:     bridle.RoleAssistant,
-				Content:  b.Text,
-			})
+			bridle.AppendAssistantText(&finalText, &sessionDelta, bridle.ProviderClaude, b.Text)
 
 		case anthropic.ToolUseBlock:
 			toolCalls = append(toolCalls, bridle.ToolInvocation{
