@@ -174,14 +174,14 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		if ctx.Err() != nil {
 			result.StopReason = bridle.StopReasonAborted
 		} else {
-			sink.Emit(bridle.TurnError{Err: fmt.Errorf("geminicli: %w", waitErr), Stage: "subprocess_exit"})
+			sink.Emit(bridle.TurnError{Err: fmt.Errorf("geminicli: %w", waitErr), Stage: bridle.TurnErrorStageSubprocessExit})
 			return bridle.ProviderResult{}, fmt.Errorf("geminicli: CLI error: %w (stderr: %s)", waitErr, stderr.String())
 		}
 	}
 
 	if parseErr == nil && result.StopReason == "" && ctx.Err() == nil {
 		parseErr = fmt.Errorf("geminicli: stream ended without result event")
-		sink.Emit(bridle.TurnError{Err: parseErr, Stage: "stream_truncated"})
+		sink.Emit(bridle.TurnError{Err: parseErr, Stage: bridle.TurnErrorStageStreamTruncated})
 	}
 
 	return result, parseErr

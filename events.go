@@ -40,12 +40,49 @@ type TurnDone struct {
 	Result TurnResult
 }
 
-// TurnError fires when the provider or harness hits a non-recoverable error.
-// Never panics across the harness boundary.
+// TurnError fires when the provider or harness hits a non-recoverable
+// error. Never panics across the harness boundary.
+//
+// Stage labels the pipeline location where the error surfaced — useful
+// for log routing and dashboards. See TurnErrorStage for the
+// enumerated values bridle emits; consumers MAY observe other strings
+// (forwarded from wire, set by tests). Free-form is intentional.
 type TurnError struct {
 	Err   error
-	Stage string // "provider", "tool", "harness-recover", etc.
+	Stage TurnErrorStage
 }
+
+// TurnErrorStage names a pipeline location that produced a TurnError.
+// The underlying type is a string so consumers that just log it (or
+// receive forwarded values from the wire) continue to work.
+type TurnErrorStage string
+
+const (
+	// TurnErrorStageHarnessRecover — panic trap inside Harness.RunTurn.
+	TurnErrorStageHarnessRecover TurnErrorStage = "harness-recover"
+	// TurnErrorStageProvider — provider.RunTurn returned a non-nil
+	// error before producing a complete result.
+	TurnErrorStageProvider TurnErrorStage = "provider"
+	// TurnErrorStageRetry — a transient provider error is being
+	// retried (claudecode); informational, not terminal.
+	TurnErrorStageRetry TurnErrorStage = "retry"
+	// TurnErrorStageProviderAPIError — claudecode stream-json reported
+	// is_api_error=true; the run continues but the kind is surfaced.
+	TurnErrorStageProviderAPIError TurnErrorStage = "provider_api_error"
+	// TurnErrorStageSubprocessExit — a subprocess-stream provider
+	// exited non-zero and the classifier had no better label.
+	TurnErrorStageSubprocessExit TurnErrorStage = "subprocess_exit"
+	// TurnErrorStageSubprocessExitPartial — subprocess exited non-zero
+	// AFTER producing parseable assistant content; the partial result
+	// is preserved with StopReason=process_exit.
+	TurnErrorStageSubprocessExitPartial TurnErrorStage = "subprocess_exit_partial"
+	// TurnErrorStageStderrOutput — subprocess wrote non-empty stderr
+	// on a clean exit; surfaced as a warning, not a failure.
+	TurnErrorStageStderrOutput TurnErrorStage = "stderr_output"
+	// TurnErrorStageStreamTruncated — the provider's event stream
+	// ended without a terminal result event.
+	TurnErrorStageStreamTruncated TurnErrorStage = "stream_truncated"
+)
 
 // ProviderErrorKind classifies a provider-level error so callers can
 // surface a distinct diagnosis string instead of an opaque exit code.

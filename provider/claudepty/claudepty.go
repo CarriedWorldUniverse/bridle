@@ -221,7 +221,7 @@ func (p *Provider) shutdownLocked() error {
 // errorResult emits TurnError and returns a ProviderResult with
 // StopReasonError. Centralizes the error-emission pattern so callers
 // don't forget the sink.
-func (p *Provider) errorResult(sink bridle.EventSink, stage string, err error) (bridle.ProviderResult, error) {
+func (p *Provider) errorResult(sink bridle.EventSink, stage bridle.TurnErrorStage, err error) (bridle.ProviderResult, error) {
 	sink.Emit(bridle.TurnError{Err: err, Stage: stage})
 	return bridle.ProviderResult{StopReason: bridle.StopReasonError}, err
 }

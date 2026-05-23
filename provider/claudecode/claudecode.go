@@ -159,7 +159,7 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		}
 		sink.Emit(bridle.TurnError{
 			Err:   fmt.Errorf("claudecode: retrying in %v (attempt %d/%d): %w", delay, attempt+1, maxRetries, err),
-			Stage: "retry",
+			Stage: bridle.TurnErrorStageRetry,
 		})
 		select {
 		case <-ctx.Done():
@@ -290,7 +290,7 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 				// stderr log file — even when the content is discarded
 				// as a synthetic CLI response.
 				pe.Err = fmt.Errorf("%w [%s]", waitErr, diagnosticsSuffix(waitErr, presult, runtime, stderrLogPath))
-				sink.Emit(bridle.TurnError{Err: pe, Stage: string(pe.Kind)})
+				sink.Emit(bridle.TurnError{Err: pe, Stage: bridle.TurnErrorStage(pe.Kind)})
 				return bridle.ProviderResult{}, pe
 			}
 			// Subprocess exited non-zero AFTER producing parseable
@@ -302,12 +302,12 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 			result.StopReason = bridle.StopReasonProcessExit
 			sink.Emit(bridle.TurnError{
 				Err:   fmt.Errorf("claudecode: subprocess exited non-zero with partial content: %w [%s]", waitErr, diagnosticsSuffix(waitErr, presult, runtime, stderrLogPath)),
-				Stage: "subprocess_exit_partial",
+				Stage: bridle.TurnErrorStageSubprocessExitPartial,
 			})
 		} else {
 			pe := classifyProviderError(stderrStr, waitErr)
 			pe.Err = fmt.Errorf("%w [%s]", waitErr, diagnosticsSuffix(waitErr, presult, runtime, stderrLogPath))
-			sink.Emit(bridle.TurnError{Err: pe, Stage: string(pe.Kind)})
+			sink.Emit(bridle.TurnError{Err: pe, Stage: bridle.TurnErrorStage(pe.Kind)})
 			return bridle.ProviderResult{}, pe
 		}
 	}
@@ -320,7 +320,7 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 	if stderrStr != "" && waitErr == nil && parseErr == nil && ctx.Err() == nil {
 		sink.Emit(bridle.TurnError{
 			Err:   fmt.Errorf("claudecode: stderr output: %s", strings.TrimSpace(stderrStr)),
-			Stage: "stderr_output",
+			Stage: bridle.TurnErrorStageStderrOutput,
 		})
 	}
 
@@ -333,7 +333,7 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 		}
 		msg += " [" + diagnosticsSuffix(waitErr, presult, runtime, stderrLogPath) + "]"
 		parseErr = fmt.Errorf("%s", msg)
-		sink.Emit(bridle.TurnError{Err: parseErr, Stage: "stream_truncated"})
+		sink.Emit(bridle.TurnError{Err: parseErr, Stage: bridle.TurnErrorStageStreamTruncated})
 	}
 
 	// If parse failed, wrap the error with stderr context so operators
@@ -407,7 +407,7 @@ func parseStream(r io.Reader, sink bridle.EventSink) (parseResult, error) {
 		if isAPIError(event) {
 			sink.Emit(bridle.TurnError{
 				Err:   fmt.Errorf("claudecode: provider API error: %s", string(event["error"])),
-				Stage: "provider_api_error",
+				Stage: bridle.TurnErrorStageProviderAPIError,
 			})
 		}
 

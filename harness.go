@@ -197,7 +197,7 @@ func (h *Harness) RunTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 	defer func() {
 		if r := recover(); r != nil {
 			e := panicErr(r)
-			sink.Emit(TurnError{Err: e, Stage: "harness-recover"})
+			sink.Emit(TurnError{Err: e, Stage: TurnErrorStageHarnessRecover})
 			result.StopReason = StopReasonError
 			err = e
 		}
