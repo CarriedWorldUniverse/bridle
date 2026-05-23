@@ -42,12 +42,6 @@ type BeforeModelCallCtx struct {
 	Step    int
 }
 
-// AfterModelChunkCtx carries context passed to AfterModelChunk hooks.
-type AfterModelChunkCtx struct {
-	Chunk ModelChunk
-	Step  int
-}
-
 // BeforeToolCallCtx carries context passed to BeforeToolCall hooks.
 type BeforeToolCallCtx struct {
 	Call ToolCall
@@ -81,13 +75,12 @@ type hookEntry[T any] struct {
 
 // hookRegistry holds all registered hooks for a Harness instance.
 type hookRegistry struct {
-	nextID           HookID
-	beforeModelCall  []hookEntry[BeforeModelCallCtx]
-	afterModelChunk  []hookEntry[AfterModelChunkCtx]
-	beforeToolCall   []hookEntry[BeforeToolCallCtx]
-	afterToolCall    []hookEntry[AfterToolCallCtx]
-	onStepBoundary   []hookEntry[OnStepBoundaryCtx]
-	onTurnDone       []hookEntry[OnTurnDoneCtx]
+	nextID          HookID
+	beforeModelCall []hookEntry[BeforeModelCallCtx]
+	beforeToolCall  []hookEntry[BeforeToolCallCtx]
+	afterToolCall   []hookEntry[AfterToolCallCtx]
+	onStepBoundary  []hookEntry[OnStepBoundaryCtx]
+	onTurnDone      []hookEntry[OnTurnDoneCtx]
 }
 
 func (r *hookRegistry) newID() HookID {
@@ -100,14 +93,6 @@ func (r *hookRegistry) newID() HookID {
 func (h *Harness) RegisterBeforeModelCall(fn Hook[BeforeModelCallCtx]) HookID {
 	id := h.hooks.newID()
 	h.hooks.beforeModelCall = append(h.hooks.beforeModelCall, hookEntry[BeforeModelCallCtx]{id, fn})
-	return id
-}
-
-// RegisterAfterModelChunk adds a hook that fires on each ModelChunk
-// event. Returns a HookID that can be passed to UnregisterHook.
-func (h *Harness) RegisterAfterModelChunk(fn Hook[AfterModelChunkCtx]) HookID {
-	id := h.hooks.newID()
-	h.hooks.afterModelChunk = append(h.hooks.afterModelChunk, hookEntry[AfterModelChunkCtx]{id, fn})
 	return id
 }
 
@@ -160,10 +145,6 @@ func (h *Harness) UnregisterHook(id HookID) bool {
 		r.beforeModelCall = next
 		return true
 	}
-	if next, ok := removeHookByID(r.afterModelChunk, id); ok {
-		r.afterModelChunk = next
-		return true
-	}
 	if next, ok := removeHookByID(r.beforeToolCall, id); ok {
 		r.beforeToolCall = next
 		return true
@@ -202,10 +183,6 @@ func removeHookByID[T any](entries []hookEntry[T], id HookID) ([]hookEntry[T], b
 // Returns (updated ctx, aborted, error).
 func (r *hookRegistry) runBeforeModelCall(ctx context.Context, hc BeforeModelCallCtx) (BeforeModelCallCtx, bool, error) {
 	return runHooks(ctx, hc, r.beforeModelCall)
-}
-
-func (r *hookRegistry) runAfterModelChunk(ctx context.Context, hc AfterModelChunkCtx) (AfterModelChunkCtx, bool, error) {
-	return runHooks(ctx, hc, r.afterModelChunk)
 }
 
 func (r *hookRegistry) runBeforeToolCall(ctx context.Context, hc BeforeToolCallCtx) (BeforeToolCallCtx, bool, error) {
