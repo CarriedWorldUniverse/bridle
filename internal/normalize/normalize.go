@@ -1,73 +1,75 @@
 // Package normalize provides helpers for mapping provider-specific wire
-// values to bridle's canonical string constants.
+// values to bridle's canonical StopReason values.
 package normalize
 
+import bridle "github.com/CarriedWorldUniverse/bridle"
+
 // ClaudeStopReason maps Claude API stop_reason strings to bridle StopReason values.
-func ClaudeStopReason(raw string) string {
+func ClaudeStopReason(raw string) bridle.StopReason {
 	switch raw {
 	case "end_turn":
-		return "model_done"
+		return bridle.StopReasonModelDone
 	case "max_tokens":
-		return "max_steps"
+		return bridle.StopReasonMaxSteps
 	case "tool_use":
 		// tool_use is not terminal in bridle; the caller manages the loop.
-		return "model_done"
+		return bridle.StopReasonModelDone
 	default:
-		return "model_done"
+		return bridle.StopReasonModelDone
 	}
 }
 
 // OpenAIStopReason maps OpenAI finish_reason strings to bridle StopReason values.
-func OpenAIStopReason(raw string) string {
+func OpenAIStopReason(raw string) bridle.StopReason {
 	switch raw {
 	case "stop":
-		return "model_done"
+		return bridle.StopReasonModelDone
 	case "length":
-		return "max_steps"
+		return bridle.StopReasonMaxSteps
 	case "tool_calls", "function_call":
-		return "model_done"
+		return bridle.StopReasonModelDone
 	default:
-		return "model_done"
+		return bridle.StopReasonModelDone
 	}
 }
 
 // GeminiStopReason maps Gemini FinishReason values to bridle StopReason values.
-func GeminiStopReason(raw string) string {
+func GeminiStopReason(raw string) bridle.StopReason {
 	switch raw {
 	case "STOP", "FINISH_REASON_STOP":
-		return "model_done"
+		return bridle.StopReasonModelDone
 	case "MAX_TOKENS":
-		return "max_steps"
+		return bridle.StopReasonMaxSteps
 	default:
-		return "model_done"
+		return bridle.StopReasonModelDone
 	}
 }
 
 // BedrockStopReason maps AWS Bedrock Converse stop_reason strings to bridle StopReason values.
-func BedrockStopReason(raw string) string {
+func BedrockStopReason(raw string) bridle.StopReason {
 	switch raw {
 	case "end_turn", "stop_sequence":
-		return "model_done"
+		return bridle.StopReasonModelDone
 	case "max_tokens":
-		return "max_steps"
+		return bridle.StopReasonMaxSteps
 	case "tool_use":
 		// non-terminal in bridle — caller manages the tool loop
-		return "model_done"
+		return bridle.StopReasonModelDone
 	case "guardrail_intervened", "content_filtered":
-		return "error"
+		return bridle.StopReasonError
 	default:
-		return "model_done"
+		return bridle.StopReasonModelDone
 	}
 }
 
 // OllamaStopReason maps Ollama done_reason strings to bridle StopReason values.
-func OllamaStopReason(raw string) string {
+func OllamaStopReason(raw string) bridle.StopReason {
 	switch raw {
 	case "stop":
-		return "model_done"
+		return bridle.StopReasonModelDone
 	case "length":
-		return "max_steps"
+		return bridle.StopReasonMaxSteps
 	default:
-		return "model_done"
+		return bridle.StopReasonModelDone
 	}
 }

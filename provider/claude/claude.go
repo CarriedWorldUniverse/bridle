@@ -138,7 +138,7 @@ func extractResult(msg *anthropic.Message) (bridle.ProviderResult, error) {
 		}
 	}
 
-	stopReason := bridle.StopReason(normalize.ClaudeStopReason(string(msg.StopReason)))
+	stopReason := normalize.ClaudeStopReason(string(msg.StopReason))
 
 	return bridle.ProviderResult{
 		FinalText: finalText,

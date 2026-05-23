@@ -130,7 +130,7 @@ func extractResult(completion *openai.ChatCompletion) (bridle.ProviderResult, er
 		})
 	}
 
-	stopReason := bridle.StopReason(normalize.OpenAIStopReason(string(choice.FinishReason)))
+	stopReason := normalize.OpenAIStopReason(string(choice.FinishReason))
 
 	return bridle.ProviderResult{
 		FinalText: finalText,
