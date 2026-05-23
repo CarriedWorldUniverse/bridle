@@ -365,13 +365,14 @@ func excerpt(line []byte, max int) string {
 // parseStream reads stream-json lines and maps them to bridle events + result.
 func parseStream(r io.Reader, sink bridle.EventSink) (parseResult, error) {
 	var (
-		finalText    string
-		toolCalls    []bridle.ToolInvocation
-		sessionDelta []bridle.SessionEvent
-		usage        bridle.Usage
-		stopReason   bridle.StopReason
-		stepCount    int
-		gotResult    bool
+		finalText     string
+		toolCalls     []bridle.ToolInvocation
+		sessionDelta  []bridle.SessionEvent
+		usage         bridle.Usage
+		stopReason    bridle.StopReason
+		stepCount     int
+		gotResult     bool
+		resolvedModel string
 
 		lastEventType    string
 		lastEventExcerpt string
@@ -415,6 +416,7 @@ func parseStream(r io.Reader, sink bridle.EventSink) (parseResult, error) {
 		case "assistant":
 			var msg struct {
 				Message struct {
+					Model   string `json:"model"`
 					Content []struct {
 						Type  string          `json:"type"`
 						Text  string          `json:"text"`
@@ -431,6 +433,16 @@ func parseStream(r io.Reader, sink bridle.EventSink) (parseResult, error) {
 				} `json:"message"`
 			}
 			if jsonErr := json.Unmarshal(line, &msg); jsonErr == nil {
+				// Capture the model id the upstream API reported.
+				// Per-turn ProviderEnv may route claude-code to a
+				// different backend (DeepSeek-via-Anthropic-shape,
+				// etc.); without this, downstream observability shows
+				// the configured cfg.Model even when the actual call
+				// hit a different upstream. Surfaced 2026-05-23 by
+				// the plumb-activity-vs-jsonl mismatch.
+				if msg.Message.Model != "" {
+					resolvedModel = msg.Message.Model
+				}
 				// Cache stats live on per-message usage in the
 				// assistant stream event, NOT the result event.
 				// Accumulate as the stream goes by; the result
@@ -548,11 +560,12 @@ func parseStream(r io.Reader, sink bridle.EventSink) (parseResult, error) {
 		// Leave StopReason empty so RunTurn can detect stream_truncated.
 		return parseResult{
 			ProviderResult: bridle.ProviderResult{
-				FinalText:    finalText,
-				ToolCalls:    toolCalls,
-				StepCount:    stepCount,
-				Usage:        usage,
-				SessionDelta: sessionDelta,
+				FinalText:     finalText,
+				ToolCalls:     toolCalls,
+				StepCount:     stepCount,
+				Usage:         usage,
+				ResolvedModel: resolvedModel,
+				SessionDelta:  sessionDelta,
 			},
 			lastEventType:    lastEventType,
 			lastEventExcerpt: lastEventExcerpt,
@@ -561,12 +574,13 @@ func parseStream(r io.Reader, sink bridle.EventSink) (parseResult, error) {
 
 	return parseResult{
 		ProviderResult: bridle.ProviderResult{
-			FinalText:    finalText,
-			ToolCalls:    toolCalls,
-			StepCount:    stepCount,
-			Usage:        usage,
-			StopReason:   stopReason,
-			SessionDelta: sessionDelta,
+			FinalText:     finalText,
+			ToolCalls:     toolCalls,
+			StepCount:     stepCount,
+			Usage:         usage,
+			StopReason:    stopReason,
+			ResolvedModel: resolvedModel,
+			SessionDelta:  sessionDelta,
 		},
 		lastEventType:    lastEventType,
 		lastEventExcerpt: lastEventExcerpt,

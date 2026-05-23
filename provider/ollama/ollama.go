@@ -154,8 +154,9 @@ func extractResult(resp api.ChatResponse) bridle.ProviderResult {
 			InputTokens:  resp.PromptEvalCount,
 			OutputTokens: resp.EvalCount,
 		},
-		StopReason:   stopReason,
-		SessionDelta: sessionDelta,
+		StopReason:    stopReason,
+		ResolvedModel: resp.Model,
+		SessionDelta:  sessionDelta,
 	}
 }
 

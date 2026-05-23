@@ -144,6 +144,9 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		if resp.UsageMetadata != nil {
 			agg.UsageMetadata = resp.UsageMetadata
 		}
+		if resp.ModelVersion != "" {
+			agg.ModelVersion = resp.ModelVersion
+		}
 	}
 
 	return extractResult(agg)
@@ -215,11 +218,12 @@ func extractResult(resp *genai.GenerateContentResponse) (bridle.ProviderResult, 
 	}
 
 	return bridle.ProviderResult{
-		FinalText:    finalText,
-		ToolCalls:    toolCalls,
-		Usage:        usage,
-		StopReason:   stopReason,
-		SessionDelta: sessionDelta,
+		FinalText:     finalText,
+		ToolCalls:     toolCalls,
+		Usage:         usage,
+		StopReason:    stopReason,
+		ResolvedModel: resp.ModelVersion,
+		SessionDelta:  sessionDelta,
 	}, nil
 }
 

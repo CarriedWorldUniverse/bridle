@@ -16,6 +16,10 @@ type Step struct {
 	ToolCalls []bridle.ToolInvocation
 	// StopReason for this step. Defaults to model_done if zero.
 	StopReason bridle.StopReason
+	// ResolvedModel populates ProviderResult.ResolvedModel — the upstream
+	// model id (post-credential-routing) that the funnel will report on
+	// EventTurnEnd. Empty leaves the field empty.
+	ResolvedModel string
 	// Err causes the provider to return this error instead of a result.
 	Err error
 }
@@ -86,10 +90,11 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 	}
 
 	return bridle.ProviderResult{
-		FinalText:    step.Text,
-		ToolCalls:    step.ToolCalls,
-		StopReason:   stopReason,
-		SessionDelta: delta,
+		FinalText:     step.Text,
+		ToolCalls:     step.ToolCalls,
+		StopReason:    stopReason,
+		ResolvedModel: step.ResolvedModel,
+		SessionDelta:  delta,
 	}, nil
 }
 

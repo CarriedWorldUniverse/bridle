@@ -54,6 +54,7 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 		finalText      string
 		stopReason     StopReason
 		sessionDelta   []SessionEvent
+		resolvedModel  string // latest non-empty ResolvedModel from any round
 	)
 
 	for {
@@ -91,6 +92,14 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 		}
 		totalUsage = addUsage(totalUsage, presult.Usage)
 		sessionDelta = append(sessionDelta, presult.SessionDelta...)
+		// Track the most recent non-empty ResolvedModel — last round
+		// wins, so multi-step turns where the model id might shift
+		// (theoretical: a future provider that re-routes mid-turn)
+		// report the final upstream identity. In practice all current
+		// providers report the same model_id every round of a turn.
+		if presult.ResolvedModel != "" {
+			resolvedModel = presult.ResolvedModel
+		}
 
 		// Self-executing providers (claude-code, gemini-cli — anything
 		// whose subprocess runs the tools itself) populate ToolCalls as
@@ -176,12 +185,13 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 	}
 
 	result := TurnResult{
-		FinalText:    finalText,
-		ToolCalls:    allInvocations,
-		StepCount:    stepCount,
-		Usage:        totalUsage,
-		StopReason:   stopReason,
-		SessionDelta: sessionDelta,
+		FinalText:     finalText,
+		ToolCalls:     allInvocations,
+		StepCount:     stepCount,
+		Usage:         totalUsage,
+		StopReason:    stopReason,
+		ResolvedModel: resolvedModel,
+		SessionDelta:  sessionDelta,
 	}
 
 	// OnTurnDone hook — may mutate SessionDelta.
