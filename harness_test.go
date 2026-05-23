@@ -440,6 +440,76 @@ func TestHooks_RegistrationOrder(t *testing.T) {
 	}
 }
 
+func TestHooks_UnregisterHook(t *testing.T) {
+	var firedA, firedB int
+	p := fake.NewProvider(fake.Step{Text: "ok"}, fake.Step{Text: "ok"})
+	h := bridle.NewHarness(p)
+	idA := h.RegisterBeforeModelCall(func(ctx context.Context, in bridle.BeforeModelCallCtx) (bridle.BeforeModelCallCtx, bridle.HookAction, error) {
+		firedA++
+		return in, bridle.HookContinue, nil
+	})
+	idB := h.RegisterBeforeModelCall(func(ctx context.Context, in bridle.BeforeModelCallCtx) (bridle.BeforeModelCallCtx, bridle.HookAction, error) {
+		firedB++
+		return in, bridle.HookContinue, nil
+	})
+	if idA == 0 || idB == 0 {
+		t.Fatalf("Register returned zero HookID (idA=%d idB=%d)", idA, idB)
+	}
+	if idA == idB {
+		t.Fatalf("Register returned duplicate HookID for distinct hooks: %d", idA)
+	}
+
+	// First turn: both fire.
+	h.RunTurn(context.Background(), bridle.TurnRequest{Model: "fake-model"}, fake.NewToolRunner(nil), &fake.SliceEventSink{})
+	if firedA != 1 || firedB != 1 {
+		t.Errorf("after first turn: firedA=%d firedB=%d; want 1,1", firedA, firedB)
+	}
+
+	// Unregister A. Second turn: only B fires.
+	if !h.UnregisterHook(idA) {
+		t.Errorf("UnregisterHook(idA) returned false; want true")
+	}
+	h.RunTurn(context.Background(), bridle.TurnRequest{Model: "fake-model"}, fake.NewToolRunner(nil), &fake.SliceEventSink{})
+	if firedA != 1 {
+		t.Errorf("after unregister: firedA=%d; want 1 (unregistered hook fired again)", firedA)
+	}
+	if firedB != 2 {
+		t.Errorf("after unregister: firedB=%d; want 2", firedB)
+	}
+}
+
+func TestHooks_UnregisterHook_UnknownAndZero(t *testing.T) {
+	p := fake.NewProvider(fake.Step{Text: "ok"})
+	h := bridle.NewHarness(p)
+	if h.UnregisterHook(0) {
+		t.Errorf("UnregisterHook(0) returned true; want false")
+	}
+	if h.UnregisterHook(bridle.HookID(9999)) {
+		t.Errorf("UnregisterHook(unknown) returned true; want false")
+	}
+}
+
+func TestHooks_UnregisterHook_CrossType(t *testing.T) {
+	// Unregister should find a hook regardless of which Register* added
+	// it — verifies the per-type slices are all checked.
+	p := fake.NewProvider(fake.Step{Text: "ok"})
+	h := bridle.NewHarness(p)
+	idBmc := h.RegisterBeforeModelCall(func(ctx context.Context, in bridle.BeforeModelCallCtx) (bridle.BeforeModelCallCtx, bridle.HookAction, error) {
+		return in, bridle.HookContinue, nil
+	})
+	idBtc := h.RegisterBeforeToolCall(func(ctx context.Context, in bridle.BeforeToolCallCtx) (bridle.BeforeToolCallCtx, bridle.HookAction, error) {
+		return in, bridle.HookContinue, nil
+	})
+	idOtd := h.RegisterOnTurnDone(func(ctx context.Context, in bridle.OnTurnDoneCtx) (bridle.OnTurnDoneCtx, bridle.HookAction, error) {
+		return in, bridle.HookContinue, nil
+	})
+	for _, id := range []bridle.HookID{idBmc, idBtc, idOtd} {
+		if !h.UnregisterHook(id) {
+			t.Errorf("UnregisterHook(%d) returned false; want true", id)
+		}
+	}
+}
+
 // --- provider error ---
 
 func TestRunTurn_ProviderError(t *testing.T) {
