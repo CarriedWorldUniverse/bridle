@@ -727,14 +727,7 @@ func mergeEnv(base []string, overlay map[string]string) []string {
 	out := make([]string, len(base))
 	copy(out, base)
 	for i, kv := range out {
-		eq := -1
-		for j := 0; j < len(kv); j++ {
-			if kv[j] == '=' {
-				eq = j
-				break
-			}
-		}
-		if eq > 0 {
+		if eq := strings.IndexByte(kv, '='); eq > 0 {
 			idx[kv[:eq]] = i
 		}
 	}
