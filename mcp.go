@@ -1,5 +1,7 @@
 package bridle
 
+import "errors"
+
 // MCPClientConfig describes how bridle connects to MCP servers and what tool
 // surface the model sees from them. The funnel constructs this; bridle consumes it.
 // Ignored by subprocess-stream providers (SupportsMCP=false).
@@ -27,8 +29,4 @@ const (
 
 // ErrToolNameCollision is returned by RunTurn when a tool name appears in both
 // TurnRequest.Tools (explicit) and the MCP-loaded tool surface.
-var ErrToolNameCollision = errorString("bridle: tool name collision between explicit Tools and MCP-loaded tools")
-
-type errorString string
-
-func (e errorString) Error() string { return string(e) }
+var ErrToolNameCollision = errors.New("bridle: tool name collision between explicit Tools and MCP-loaded tools")
