@@ -211,14 +211,51 @@ func toClaudeSystem(prompt string) []anthropic.TextBlockParam {
 	return []anthropic.TextBlockParam{{Text: prompt}}
 }
 
+// jsonSchemaShape mirrors the subset of JSON Schema the Anthropic
+// ToolInputSchemaParam consumes. Only `properties` and `required`
+// are surfaced as typed fields; `type` is always "object" and the
+// SDK default handles it. Anything else (description, default,
+// enum on nested properties, $schema/$id metadata, etc.) is
+// preserved verbatim under `properties` — JSON Schema's recursive
+// shape means we don't need to walk it ourselves.
+type jsonSchemaShape struct {
+	Type       string         `json:"type"`
+	Properties map[string]any `json:"properties"`
+	Required   []string       `json:"required"`
+}
+
+// toClaudeTools converts bridle's ToolDef list to the Anthropic
+// Messages tool spec. The InputSchema is parsed as JSON Schema and
+// destructured into ToolInputSchemaParam's typed fields.
+//
+// Pre-fix (NEX-299 Pass 1, 2026-05-26): the previous implementation
+// unmarshalled the entire schema object into ToolInputSchemaParam.
+// Properties, producing a wire payload like
+//
+//	{"properties": {"type": "object",
+//	                "properties": {"text": {...}},
+//	                "required": ["text"]}}
+//
+// — structurally wrong (properties nested inside properties). Real
+// api.anthropic.com tolerated this with lenient parsing; strict
+// validators (DeepSeek's /anthropic translation gateway) reject it
+// with "Invalid schema for function 'foo': [\"x\"] is not of types
+// \"boolean\", \"object\"" because the misplaced `required` array
+// looks like a malformed property entry. Found via nexus
+// test-provider --tools against DeepSeek (NEX-297 L1).
+//
+// The fix lifts `properties` and `required` to their proper top-level
+// positions on ToolInputSchemaParam so the wire payload matches the
+// Anthropic spec.
 func toClaudeTools(defs []bridle.ToolDef) []anthropic.ToolUnionParam {
 	out := make([]anthropic.ToolUnionParam, 0, len(defs))
 	for _, d := range defs {
 		schema := anthropic.ToolInputSchemaParam{}
 		if len(d.InputSchema) > 0 {
-			var props interface{}
-			if err := json.Unmarshal(d.InputSchema, &props); err == nil {
-				schema.Properties = props
+			var parsed jsonSchemaShape
+			if err := json.Unmarshal(d.InputSchema, &parsed); err == nil {
+				schema.Properties = parsed.Properties
+				schema.Required = parsed.Required
 			}
 		}
 		out = append(out, anthropic.ToolUnionParamOfTool(schema, d.Name))
