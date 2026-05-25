@@ -228,6 +228,102 @@ func TestToolSchemaWirePayloadIsCorrectlyShaped(t *testing.T) {
 	}
 }
 
+// TestNEX299P2_SamplingAndOutputFieldsThreadToWire pins NEX-299 Pass
+// 2: TurnRequest's new sampling + output knobs (Temperature, TopP,
+// TopK, MaxOutputTokens, StopSequences, ToolChoice) all reach the
+// Anthropic wire format. Pre-Pass-2 these were silently dropped —
+// MaxTokens in particular was hardcoded to 4096 with no way to
+// override.
+func TestNEX299P2_SamplingAndOutputFieldsThreadToWire(t *testing.T) {
+	h := &capturingBodyHandler{}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	temp := 0.0
+	topP := 0.95
+	topK := 40
+
+	p := claude.NewWithBaseURL("sk-test-key", srv.URL)
+	_, err := p.RunTurn(context.Background(), bridle.ProviderRequest{
+		Model:           "test-model",
+		Messages:        []bridle.ProviderMessage{{Role: "user", Content: "hi"}},
+		Temperature:     &temp,
+		TopP:            &topP,
+		TopK:            &topK,
+		MaxOutputTokens: 128,
+		StopSequences:   []string{"</done>", "\n\n\n"},
+		// ToolChoice="any" + a tool, to exercise the tool_choice path
+		ToolChoice: "any",
+		Tools: []bridle.ToolDef{{
+			Name:        "noop",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
+		}},
+	}, nullSink{})
+	if err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+
+	body, _ := h.lastBody.Load().([]byte)
+	var wire map[string]any
+	if err := json.Unmarshal(body, &wire); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if v, _ := wire["temperature"].(float64); v != 0.0 {
+		// 0.0 is the zero value AND a meaningful temperature setting;
+		// the SDK uses param.Opt to disambiguate. Presence of the key
+		// in the JSON is what matters (omitzero would skip if unset).
+		t.Errorf("temperature = %v, want 0.0", v)
+	}
+	if _, present := wire["temperature"]; !present {
+		t.Error("temperature key missing from wire — Temperature *float64 not threaded")
+	}
+	if v, _ := wire["top_p"].(float64); v != 0.95 {
+		t.Errorf("top_p = %v, want 0.95", v)
+	}
+	if v, _ := wire["top_k"].(float64); v != 40 {
+		t.Errorf("top_k = %v, want 40", v)
+	}
+	if v, _ := wire["max_tokens"].(float64); v != 128 {
+		t.Errorf("max_tokens = %v, want 128 (override should win over the 4096 default)", v)
+	}
+	stops, _ := wire["stop_sequences"].([]any)
+	if len(stops) != 2 || stops[0] != "</done>" {
+		t.Errorf("stop_sequences = %v, want [</done> \\n\\n\\n]", stops)
+	}
+	tc, _ := wire["tool_choice"].(map[string]any)
+	if tc == nil {
+		t.Error("tool_choice missing from wire — ToolChoice not threaded")
+	} else if tc["type"] != "any" {
+		t.Errorf("tool_choice.type = %v, want any", tc["type"])
+	}
+}
+
+// TestNEX299P2_DefaultMaxTokensWhenUnset pins the back-compat
+// guarantee: MaxOutputTokens==0 keeps the historical 4096 default so
+// existing callers see no behaviour change.
+func TestNEX299P2_DefaultMaxTokensWhenUnset(t *testing.T) {
+	h := &capturingBodyHandler{}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	p := claude.NewWithBaseURL("sk-test-key", srv.URL)
+	_, err := p.RunTurn(context.Background(), bridle.ProviderRequest{
+		Model:    "test-model",
+		Messages: []bridle.ProviderMessage{{Role: "user", Content: "hi"}},
+		// MaxOutputTokens deliberately unset (== 0)
+	}, nullSink{})
+	if err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	body, _ := h.lastBody.Load().([]byte)
+	var wire map[string]any
+	_ = json.Unmarshal(body, &wire)
+	if v, _ := wire["max_tokens"].(float64); v != 4096 {
+		t.Errorf("max_tokens fallback = %v, want 4096 (back-compat default)", v)
+	}
+}
+
 // TestToolSchemaWithNoRequiredField pins that schemas without a
 // "required" array still serialise cleanly. Important because the
 // fix's `parsed.Required` will be nil; we want that to omit the

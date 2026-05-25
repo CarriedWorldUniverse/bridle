@@ -2,6 +2,7 @@ package openai_test
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,20 @@ import (
 	bridle "github.com/CarriedWorldUniverse/bridle"
 	"github.com/CarriedWorldUniverse/bridle/provider/openai"
 )
+
+// capturingBodyHandler records the request body of every POST so
+// tests can assert structural shape of what bridle puts on the wire.
+type capturingBodyHandler struct {
+	hits     atomic.Int32
+	lastBody atomic.Value // []byte
+}
+
+func (h *capturingBodyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.hits.Add(1)
+	body, _ := io.ReadAll(r.Body)
+	h.lastBody.Store(body)
+	streamMinimalOpenAIResponse(w)
+}
 
 // captureHandler records the path + auth of every request and streams
 // back a minimal OpenAI-Chat-Completions SSE response so the SDK
@@ -111,5 +126,162 @@ func TestNewWithBaseURL_EmptyBaseURL_FallsBackToDefault(t *testing.T) {
 	}
 	if p.Name() != bridle.ProviderOpenAI {
 		t.Errorf("expected ProviderOpenAI name; got %q", p.Name())
+	}
+}
+
+// TestNEX299P2_SamplingAndOutputFieldsThreadToWire pins NEX-299 Pass
+// 2: TurnRequest's new fields (Temperature, TopP, Seed,
+// MaxOutputTokens, StopSequences, ResponseFormat, ToolChoice) all
+// reach the OpenAI wire format. Pre-Pass-2 these were silently
+// dropped — ToolChoice in particular was a documented bridle field
+// the openai provider just ignored.
+func TestNEX299P2_SamplingAndOutputFieldsThreadToWire(t *testing.T) {
+	h := &capturingBodyHandler{}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	temp := 0.0
+	topP := 0.95
+	seed := 42
+
+	p := openai.NewWithBaseURL("sk-test-key", srv.URL)
+	_, err := p.RunTurn(context.Background(), bridle.ProviderRequest{
+		Model:           "test-model",
+		Messages:        []bridle.ProviderMessage{{Role: "user", Content: "hi"}},
+		Temperature:     &temp,
+		TopP:            &topP,
+		Seed:            &seed,
+		MaxOutputTokens: 256,
+		StopSequences:   []string{"END", "STOP"},
+		ResponseFormat: &bridle.ResponseFormat{
+			Type:        "json_schema",
+			Name:        "verdict",
+			Description: "judge verdict",
+			Strict:      true,
+			Schema:      json.RawMessage(`{"type":"object","properties":{"class":{"type":"string"}},"required":["class"],"additionalProperties":false}`),
+		},
+		ToolChoice: "any",
+		Tools: []bridle.ToolDef{{
+			Name:        "noop",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
+		}},
+	}, nullSink{})
+	if err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+
+	body, _ := h.lastBody.Load().([]byte)
+	var wire map[string]any
+	if err := json.Unmarshal(body, &wire); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if _, present := wire["temperature"]; !present {
+		t.Error("temperature key missing from wire — Temperature *float64 not threaded")
+	}
+	if v, _ := wire["temperature"].(float64); v != 0.0 {
+		t.Errorf("temperature = %v, want 0.0", v)
+	}
+	if v, _ := wire["top_p"].(float64); v != 0.95 {
+		t.Errorf("top_p = %v, want 0.95", v)
+	}
+	if v, _ := wire["seed"].(float64); v != 42 {
+		t.Errorf("seed = %v, want 42", v)
+	}
+	if v, _ := wire["max_completion_tokens"].(float64); v != 256 {
+		t.Errorf("max_completion_tokens = %v, want 256", v)
+	}
+	stops, _ := wire["stop"].([]any)
+	if len(stops) != 2 || stops[0] != "END" {
+		t.Errorf("stop = %v, want [END STOP]", stops)
+	}
+	// tool_choice: bridle "any" maps to OpenAI "required" (string variant)
+	if tc := wire["tool_choice"]; tc != "required" {
+		t.Errorf("tool_choice = %v, want \"required\" (bridle 'any' -> OpenAI 'required')", tc)
+	}
+	// response_format json_schema with strict
+	rf, _ := wire["response_format"].(map[string]any)
+	if rf == nil {
+		t.Fatal("response_format missing")
+	}
+	if rf["type"] != "json_schema" {
+		t.Errorf("response_format.type = %v, want json_schema", rf["type"])
+	}
+	js, _ := rf["json_schema"].(map[string]any)
+	if js == nil {
+		t.Fatal("response_format.json_schema missing")
+	}
+	if js["name"] != "verdict" {
+		t.Errorf("response_format.json_schema.name = %v, want verdict", js["name"])
+	}
+	if js["strict"] != true {
+		t.Errorf("response_format.json_schema.strict = %v, want true", js["strict"])
+	}
+	if _, ok := js["schema"].(map[string]any); !ok {
+		t.Errorf("response_format.json_schema.schema should be an object, got %T", js["schema"])
+	}
+}
+
+// TestNEX299P2_NamedToolChoiceUsesObjectVariant pins that asking for
+// a specific tool by name produces the named-function tool_choice
+// variant (not the string variant), matching OpenAI's wire spec.
+func TestNEX299P2_NamedToolChoiceUsesObjectVariant(t *testing.T) {
+	h := &capturingBodyHandler{}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	p := openai.NewWithBaseURL("sk-test-key", srv.URL)
+	_, err := p.RunTurn(context.Background(), bridle.ProviderRequest{
+		Model:      "test-model",
+		Messages:   []bridle.ProviderMessage{{Role: "user", Content: "hi"}},
+		ToolChoice: "send_chat",
+		Tools: []bridle.ToolDef{{
+			Name:        "send_chat",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
+		}},
+	}, nullSink{})
+	if err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	body, _ := h.lastBody.Load().([]byte)
+	var wire map[string]any
+	_ = json.Unmarshal(body, &wire)
+	tc, ok := wire["tool_choice"].(map[string]any)
+	if !ok {
+		t.Fatalf("tool_choice should be object variant for named-tool choice; got %T (%v)", wire["tool_choice"], wire["tool_choice"])
+	}
+	if tc["type"] != "function" {
+		t.Errorf("tool_choice.type = %v, want function", tc["type"])
+	}
+	fn, _ := tc["function"].(map[string]any)
+	if fn == nil || fn["name"] != "send_chat" {
+		t.Errorf("tool_choice.function.name = %v, want send_chat", fn)
+	}
+}
+
+// TestNEX299P2_NilOptionalFieldsOmittedFromWire pins back-compat:
+// when caller doesn't set the new fields, none of them appear on
+// the wire (nothing to break existing payload contracts).
+func TestNEX299P2_NilOptionalFieldsOmittedFromWire(t *testing.T) {
+	h := &capturingBodyHandler{}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	p := openai.NewWithBaseURL("sk-test-key", srv.URL)
+	_, err := p.RunTurn(context.Background(), bridle.ProviderRequest{
+		Model:    "test-model",
+		Messages: []bridle.ProviderMessage{{Role: "user", Content: "hi"}},
+		// All NEX-299 Pass 2 fields deliberately unset.
+	}, nullSink{})
+	if err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	body, _ := h.lastBody.Load().([]byte)
+	var wire map[string]any
+	_ = json.Unmarshal(body, &wire)
+	for _, k := range []string{"temperature", "top_p", "seed", "max_completion_tokens", "stop", "response_format", "tool_choice"} {
+		if _, present := wire[k]; present {
+			t.Errorf("%s should be absent when unset (back-compat); got value %v", k, wire[k])
+		}
 	}
 }
