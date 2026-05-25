@@ -15,14 +15,26 @@ import (
 
 // Provider implements bridle.Provider for the Anthropic Claude API.
 type Provider struct {
-	client *anthropic.Client
-	apiKey string
+	client  *anthropic.Client
+	apiKey  string
+	baseURL string
 }
 
 // New returns a Claude provider.
 // If apiKey is empty, the ANTHROPIC_API_KEY environment variable is used.
 func New(apiKey string) *Provider {
 	return &Provider{apiKey: apiKey}
+}
+
+// NewWithBaseURL returns a Claude provider targeting an
+// Anthropic-API-compatible endpoint at baseURL (e.g.
+// "https://api.deepseek.com/anthropic"). Empty baseURL falls back to
+// the SDK default (api.anthropic.com), matching New's behaviour.
+// Useful for third-party services that speak the Anthropic Messages
+// wire shape — keeps the existing tool / streaming / event plumbing
+// while pointing requests at an alternate auth domain.
+func NewWithBaseURL(apiKey, baseURL string) *Provider {
+	return &Provider{apiKey: apiKey, baseURL: baseURL}
 }
 
 // NewWithClient returns a Claude provider using a pre-configured client.
@@ -46,13 +58,15 @@ func (p *Provider) getClient() *anthropic.Client {
 	if p.client != nil {
 		return p.client
 	}
+	opts := make([]option.RequestOption, 0, 2)
 	if p.apiKey != "" {
-		c := anthropic.NewClient(option.WithAPIKey(p.apiKey))
-		p.client = &c
-	} else {
-		c := anthropic.NewClient()
-		p.client = &c
+		opts = append(opts, option.WithAPIKey(p.apiKey))
 	}
+	if p.baseURL != "" {
+		opts = append(opts, option.WithBaseURL(p.baseURL))
+	}
+	c := anthropic.NewClient(opts...)
+	p.client = &c
 	return p.client
 }
 
