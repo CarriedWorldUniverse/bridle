@@ -132,6 +132,40 @@ type TurnRequest struct {
 	// Not all providers honour all values; unsupported values fall back to "auto".
 	ToolChoice string
 
+	// Sampling controls (NEX-299 Pass 2). Pointer types so "unset" is
+	// distinguishable from "explicitly zero" — providers fall through
+	// to their own default when nil.
+	//
+	//   Temperature: lower = more deterministic. 0 for classifier
+	//                tasks (cheap judge); higher for creative.
+	//   TopP:        nucleus sampling. Standard across providers.
+	//   TopK:        claude-only; openai silently ignores.
+	//   Seed:        openai-only deterministic sampling seed;
+	//                claude silently ignores. Pair with Temperature=0
+	//                for full reproducibility.
+	Temperature *float64
+	TopP        *float64
+	TopK        *int
+	Seed        *int
+
+	// MaxOutputTokens caps generation length. 0 = provider default
+	// (claude internally falls back to 4096; openai uses its own
+	// account-level default). Set non-zero for cost-bounded paths
+	// like cheap-judge classifier where verdicts are tiny.
+	MaxOutputTokens int
+
+	// StopSequences halt generation on first match. Maps to openai
+	// `stop` and claude `stop_sequences`. Empty = no stop sequences.
+	StopSequences []string
+
+	// ResponseFormat constrains the model's output shape — most
+	// usefully for json_schema strict mode, which guarantees the
+	// response matches Schema. Providers that don't support this
+	// (claude as of writing) silently ignore. Callers wanting
+	// portability should also encode schema requirements in the
+	// system prompt. Nil = free-form text (provider default).
+	ResponseFormat *ResponseFormat
+
 	// Cwd is the working directory for subprocess-style providers
 	// (currently claude-code). Empty falls through to the bridle host
 	// process's cwd. Per-request rather than per-Harness because

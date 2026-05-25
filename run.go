@@ -320,6 +320,16 @@ func lowerRequest(req TurnRequest) ProviderRequest {
 		Model:              req.Model,
 		Cwd:                req.Cwd,
 		ProviderEnv:        req.ProviderEnv,
+		// NEX-299 Pass 2: sampling / output controls flow through to
+		// the provider, which translates each to its wire format and
+		// silently ignores fields its API doesn't support.
+		Temperature:     req.Temperature,
+		TopP:            req.TopP,
+		TopK:            req.TopK,
+		Seed:            req.Seed,
+		MaxOutputTokens: req.MaxOutputTokens,
+		StopSequences:   req.StopSequences,
+		ResponseFormat:  req.ResponseFormat,
 	}
 }
 

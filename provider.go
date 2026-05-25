@@ -1,6 +1,9 @@
 package bridle
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // ProviderCategory classifies how a provider executes tool calls.
 type ProviderCategory string
@@ -57,6 +60,47 @@ type ProviderRequest struct {
 	// direct-API providers read it as auth/base-url config. Empty/nil =
 	// provider uses its own default config.
 	ProviderEnv map[string]string
+
+	// Sampling + output control — see TurnRequest field docs.
+	// NEX-299 Pass 2. Providers honour what their wire format supports
+	// and silently ignore the rest (e.g. Seed openai-only, TopK
+	// claude-only).
+	Temperature     *float64
+	TopP            *float64
+	TopK            *int
+	Seed            *int
+	MaxOutputTokens int
+	StopSequences   []string
+	ResponseFormat  *ResponseFormat
+}
+
+// ResponseFormat constrains the model's output shape (NEX-299 Pass 2).
+// Maps to OpenAI's response_format union. Claude has no equivalent
+// API-level field today; providers that don't support it silently
+// ignore — callers wanting cross-provider portability should also
+// encode the shape in the system prompt.
+type ResponseFormat struct {
+	// Type is one of: "text" | "json_object" | "json_schema". Empty
+	// defaults to "text" (provider default, free-form).
+	Type string
+
+	// Name identifies the schema for the "json_schema" type. OpenAI
+	// requires it (max 64 chars, a-z/A-Z/0-9/_/-).
+	Name string
+
+	// Description is optional context for the model on what the
+	// schema is for. Only used for "json_schema".
+	Description string
+
+	// Schema is a JSON Schema describing the expected response.
+	// Required when Type == "json_schema". Ignored otherwise.
+	Schema json.RawMessage
+
+	// Strict, when Type == "json_schema", turns on OpenAI's strict
+	// structured-outputs mode (response is GUARANTEED to match
+	// schema). Recommended on for classifier paths where
+	// parse-failure costs more than rejection.
+	Strict bool
 }
 
 // ProviderMessage is a single exchange entry in provider-agnostic form.

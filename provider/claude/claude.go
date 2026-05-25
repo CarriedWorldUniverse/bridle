@@ -87,12 +87,44 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 	// the caller's content IS the whole system message. So here the field
 	// functions identically to a plain SystemPrompt — rename is semantic
 	// consistency, not behavior change.
+	// MaxTokens is required by the Anthropic API. Caller's
+	// MaxOutputTokens wins when non-zero; otherwise fall back to the
+	// historical default (4096) so existing callers see unchanged
+	// behaviour post-NEX-299-Pass-2.
+	maxTokens := int64(defaultClaudeMaxTokens)
+	if req.MaxOutputTokens > 0 {
+		maxTokens = int64(req.MaxOutputTokens)
+	}
+
 	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(req.Model),
 		System:    toClaudeSystem(req.AppendSystemPrompt),
 		Messages:  messages,
-		MaxTokens: 4096,
+		MaxTokens: maxTokens,
 	}
+
+	// NEX-299 Pass 2: thread the sampling + output knobs the Anthropic
+	// Messages API exposes. Nil pointers / empty slices stay unset
+	// (omitzero on the SDK param).
+	if req.Temperature != nil {
+		params.Temperature = anthropic.Float(*req.Temperature)
+	}
+	if req.TopP != nil {
+		params.TopP = anthropic.Float(*req.TopP)
+	}
+	if req.TopK != nil {
+		params.TopK = anthropic.Int(int64(*req.TopK))
+	}
+	if len(req.StopSequences) > 0 {
+		params.StopSequences = req.StopSequences
+	}
+	if tc := toClaudeToolChoice(req.ToolChoice); tc != nil {
+		params.ToolChoice = *tc
+	}
+	// Seed: openai-only knob; claude SDK has no equivalent. Silently ignored.
+	// ResponseFormat: claude has no API-level json-schema enforcement;
+	// callers wanting structured output bake instructions into the
+	// system prompt. Silently ignored.
 
 	tools := toClaudeTools(req.Tools)
 	if len(tools) > 0 {
@@ -209,6 +241,40 @@ func toClaudeSystem(prompt string) []anthropic.TextBlockParam {
 		return nil
 	}
 	return []anthropic.TextBlockParam{{Text: prompt}}
+}
+
+// defaultClaudeMaxTokens preserves the pre-NEX-299-Pass-2 default
+// — the Anthropic API requires max_tokens, and callers that don't
+// supply one need a sensible cap. Documented separately so a future
+// change is grep-able instead of buried in the RunTurn body.
+const defaultClaudeMaxTokens = 4096
+
+// toClaudeToolChoice maps bridle's tool_choice string to Anthropic's
+// ToolChoiceUnionParam. Returns nil for empty input (caller leaves
+// the field unset — SDK omits it, model uses its default).
+//
+//	"" → nil (provider default, usually "auto")
+//	"auto" → ToolChoiceAutoParam
+//	"any" → ToolChoiceAnyParam
+//	"none" → ToolChoiceNoneParam
+//	"<name>" → ToolChoiceToolParam{Name: <name>}
+func toClaudeToolChoice(choice string) *anthropic.ToolChoiceUnionParam {
+	switch choice {
+	case "":
+		return nil
+	case "auto":
+		u := anthropic.ToolChoiceUnionParam{OfAuto: &anthropic.ToolChoiceAutoParam{}}
+		return &u
+	case "any":
+		u := anthropic.ToolChoiceUnionParam{OfAny: &anthropic.ToolChoiceAnyParam{}}
+		return &u
+	case "none":
+		u := anthropic.ToolChoiceUnionParam{OfNone: &anthropic.ToolChoiceNoneParam{}}
+		return &u
+	default:
+		u := anthropic.ToolChoiceParamOfTool(choice)
+		return &u
+	}
 }
 
 // jsonSchemaShape mirrors the subset of JSON Schema the Anthropic

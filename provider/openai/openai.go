@@ -8,7 +8,7 @@ import (
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
-	"github.com/openai/openai-go/packages/param"
+	openaiparam "github.com/openai/openai-go/packages/param"
 	"github.com/openai/openai-go/shared"
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
@@ -89,6 +89,35 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 	if len(tools) > 0 {
 		params.Tools = tools
 	}
+
+	// NEX-299 Pass 2: thread the sampling + output knobs the OpenAI
+	// Chat Completions API exposes. Nil pointers / zero values stay
+	// unset (omitzero on the SDK param).
+	if req.Temperature != nil {
+		params.Temperature = openaiparam.NewOpt(*req.Temperature)
+	}
+	if req.TopP != nil {
+		params.TopP = openaiparam.NewOpt(*req.TopP)
+	}
+	if req.Seed != nil {
+		params.Seed = openaiparam.NewOpt(int64(*req.Seed))
+	}
+	if req.MaxOutputTokens > 0 {
+		params.MaxCompletionTokens = openaiparam.NewOpt(int64(req.MaxOutputTokens))
+	}
+	if len(req.StopSequences) > 0 {
+		// Stop accepts a string OR string array. Use the array variant
+		// uniformly — single-stop callers get the same wire shape as
+		// multi-stop callers, simpler than per-len branching.
+		params.Stop = openai.ChatCompletionNewParamsStopUnion{OfStringArray: req.StopSequences}
+	}
+	if rf := toOpenAIResponseFormat(req.ResponseFormat); rf != nil {
+		params.ResponseFormat = *rf
+	}
+	if tc := toOpenAIToolChoice(req.ToolChoice); tc != nil {
+		params.ToolChoice = *tc
+	}
+	// TopK: claude-only; OpenAI has no equivalent. Silently ignored.
 
 	stream := p.getClient().Chat.Completions.NewStreaming(ctx, params)
 	acc := openai.ChatCompletionAccumulator{}
@@ -177,7 +206,7 @@ func toOpenAIMessages(systemPrompt string, msgs []bridle.ProviderMessage) []open
 			}
 			var assistant openai.ChatCompletionAssistantMessageParam
 			if m.Content != "" {
-				assistant.Content.OfString = param.NewOpt(m.Content)
+				assistant.Content.OfString = openaiparam.NewOpt(m.Content)
 			}
 			if len(m.ToolCalls) > 0 {
 				tcs := make([]openai.ChatCompletionMessageToolCallParam, 0, len(m.ToolCalls))
@@ -225,4 +254,82 @@ func toOpenAITools(defs []bridle.ToolDef) []openai.ChatCompletionToolParam {
 		})
 	}
 	return out
+}
+
+// toOpenAIResponseFormat maps bridle's ResponseFormat to OpenAI's
+// response_format union. Nil input → nil (caller leaves the field
+// unset → SDK omits → model uses free-form text default).
+//
+//	Type=""             → nil (free-form text default)
+//	Type="text"         → ResponseFormatTextParam
+//	Type="json_object"  → ResponseFormatJSONObjectParam
+//	Type="json_schema"  → ResponseFormatJSONSchemaParam with strict mode
+//	                      from rf.Strict. Schema must be non-empty.
+//
+// Unknown Type returns nil so a future-typed bridle caller doesn't
+// accidentally send a malformed format to an older provider.
+// NEX-299 Pass 2.
+func toOpenAIResponseFormat(rf *bridle.ResponseFormat) *openai.ChatCompletionNewParamsResponseFormatUnion {
+	if rf == nil {
+		return nil
+	}
+	switch rf.Type {
+	case "", "text":
+		return nil // SDK default — same as not setting the field
+	case "json_object":
+		u := openai.ChatCompletionNewParamsResponseFormatUnion{
+			OfJSONObject: &shared.ResponseFormatJSONObjectParam{},
+		}
+		return &u
+	case "json_schema":
+		var schemaAny any
+		if len(rf.Schema) > 0 {
+			_ = json.Unmarshal(rf.Schema, &schemaAny)
+		}
+		js := shared.ResponseFormatJSONSchemaJSONSchemaParam{
+			Name:   rf.Name,
+			Schema: schemaAny,
+		}
+		if rf.Strict {
+			js.Strict = openaiparam.NewOpt(true)
+		}
+		if rf.Description != "" {
+			js.Description = openaiparam.NewOpt(rf.Description)
+		}
+		u := openai.ChatCompletionNewParamsResponseFormatUnion{
+			OfJSONSchema: &shared.ResponseFormatJSONSchemaParam{JSONSchema: js},
+		}
+		return &u
+	default:
+		return nil
+	}
+}
+
+// toOpenAIToolChoice maps bridle's tool_choice string to OpenAI's
+// tool_choice union.
+//
+//	"" → nil (provider default, usually "auto")
+//	"auto" / "none" / "required" → string variant (matches OpenAI spec;
+//	                               bridle's "any" maps to OpenAI's "required")
+//	"<name>" → named tool variant forcing the model to call <name>
+//
+// NEX-299 Pass 2. Pre-fix the openai provider silently dropped
+// ToolChoice entirely even though bridle.ProviderRequest carried it.
+func toOpenAIToolChoice(choice string) *openai.ChatCompletionToolChoiceOptionUnionParam {
+	switch choice {
+	case "":
+		return nil
+	case "auto", "none", "required":
+		u := openai.ChatCompletionToolChoiceOptionUnionParam{OfAuto: openaiparam.NewOpt(choice)}
+		return &u
+	case "any":
+		// bridle's "any" semantically == OpenAI's "required"
+		u := openai.ChatCompletionToolChoiceOptionUnionParam{OfAuto: openaiparam.NewOpt("required")}
+		return &u
+	default:
+		named := openai.ChatCompletionToolChoiceOptionParamOfChatCompletionNamedToolChoice(
+			openai.ChatCompletionNamedToolChoiceFunctionParam{Name: choice},
+		)
+		return &named
+	}
 }
