@@ -17,14 +17,27 @@ import (
 
 // Provider implements bridle.Provider for the OpenAI API.
 type Provider struct {
-	client *openai.Client
-	apiKey string
+	client  *openai.Client
+	apiKey  string
+	baseURL string
 }
 
 // New returns an OpenAI provider.
 // If apiKey is empty, the OPENAI_API_KEY environment variable is used.
 func New(apiKey string) *Provider {
 	return &Provider{apiKey: apiKey}
+}
+
+// NewWithBaseURL returns an OpenAI provider targeting an
+// OpenAI-API-compatible endpoint at baseURL (e.g.
+// "https://api.deepseek.com/v1", "https://api.together.xyz/v1",
+// "http://localhost:11434/v1" for Ollama). Empty baseURL falls back
+// to the SDK default (api.openai.com), matching New's behaviour.
+// Useful for the many third-party services that speak the OpenAI
+// Chat Completions wire shape — keeps tool / streaming / event
+// plumbing while pointing requests at an alternate auth domain.
+func NewWithBaseURL(apiKey, baseURL string) *Provider {
+	return &Provider{apiKey: apiKey, baseURL: baseURL}
 }
 
 // NewWithClient returns an OpenAI provider using a pre-configured client.
@@ -48,13 +61,15 @@ func (p *Provider) getClient() *openai.Client {
 	if p.client != nil {
 		return p.client
 	}
+	opts := make([]option.RequestOption, 0, 2)
 	if p.apiKey != "" {
-		c := openai.NewClient(option.WithAPIKey(p.apiKey))
-		p.client = &c
-	} else {
-		c := openai.NewClient()
-		p.client = &c
+		opts = append(opts, option.WithAPIKey(p.apiKey))
 	}
+	if p.baseURL != "" {
+		opts = append(opts, option.WithBaseURL(p.baseURL))
+	}
+	c := openai.NewClient(opts...)
+	p.client = &c
 	return p.client
 }
 
