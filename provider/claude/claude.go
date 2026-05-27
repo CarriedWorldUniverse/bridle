@@ -207,6 +207,37 @@ func extractResult(msg *anthropic.Message) (bridle.ProviderResult, error) {
 
 	stopReason := normalize.ClaudeStopReason(string(msg.StopReason))
 
+	// NEX-320 cross-turn: attach this turn's thinking blocks to the
+	// FIRST assistant SessionEvent so cross-Deliberate replay
+	// (run.go lowerRequest) can re-emit them. Without this they live
+	// only on ProviderResult — which dies at the end of the current
+	// Run — and the next Deliberate's call to Anthropic rejects 400
+	// because the assistant history lost its thinking blocks.
+	//
+	// First-event-only (not all assistant events of the turn) because
+	// each SessionEvent becomes its own ProviderMessage in lowerRequest;
+	// duplicating would emit thinking blocks twice on the wire.
+	if len(thinkingBlocks) > 0 {
+		attached := false
+		for i := range sessionDelta {
+			if sessionDelta[i].Role == bridle.RoleAssistant {
+				sessionDelta[i].ThinkingBlocks = thinkingBlocks
+				attached = true
+				break
+			}
+		}
+		if !attached {
+			// Turn produced only thinking (no text, no tool_use) —
+			// edge case but possible (e.g. judged-and-aborted). Emit
+			// a synthetic assistant carrier so the blocks survive.
+			sessionDelta = append([]bridle.SessionEvent{{
+				Provider:       bridle.ProviderClaude,
+				Role:           bridle.RoleAssistant,
+				ThinkingBlocks: thinkingBlocks,
+			}}, sessionDelta...)
+		}
+	}
+
 	return bridle.ProviderResult{
 		FinalText: finalText,
 		ToolCalls: toolCalls,

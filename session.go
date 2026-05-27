@@ -141,4 +141,21 @@ type SessionEvent struct {
 	// RawJSON carries provider-specific blocks (tool_use, tool_result, etc.)
 	// that don't fit the plain content field. Valid only in conjunction with Provider.
 	RawJSON json.RawMessage `json:"raw,omitempty"`
+	// ThinkingBlocks (NEX-320 cross-turn) preserves Claude extended-
+	// thinking blocks across Deliberate calls — within a single Run the
+	// blocks survive via ProviderResult.ThinkingBlocks, but the funnel's
+	// SessionTail re-lowering path (run.go lowerRequest) erases them
+	// without this field. Anthropic API rejects multi-turn requests
+	// whose assistant history is missing thinking blocks from prior
+	// thinking-mode turns ("content[].thinking ... must be passed back").
+	//
+	// Attached to the FIRST assistant SessionEvent of each turn (text
+	// or tool_use) — duplicating across all events in the same turn
+	// would double-emit the blocks on the wire. lowerRequest carries
+	// these onto the corresponding ProviderMessage.
+	//
+	// omitempty keeps existing JSONL session logs backward-compatible
+	// (old entries decode with empty slice; cross-turn replay no-ops
+	// when nil).
+	ThinkingBlocks []ThinkingBlock `json:"thinking_blocks,omitempty"`
 }

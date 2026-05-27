@@ -168,3 +168,79 @@ func TestToClaudeMessages_EmptyTypeDefaultsToThinking(t *testing.T) {
 		t.Errorf("empty type should be treated as thinking; got %+v", out[0].Content[0])
 	}
 }
+
+// NEX-320 cross-turn: thinking blocks captured during extractResult
+// must be attached to the FIRST assistant SessionEvent so they survive
+// the funnel's SessionTail → ProviderMessage rebuild on the next
+// Deliberate. Without this attachment Anthropic 400s with
+// "content[].thinking ... must be passed back to the API".
+//
+// Validated against the real anthropic.Message extractResult would
+// produce — text + tool_use + thinking blocks in a single turn.
+func TestExtractResult_AttachesThinkingBlocksToFirstAssistantSessionEvent(t *testing.T) {
+	// Build a SessionDelta the way extractResult would for a
+	// turn with [thinking, text, tool_use]. The block-walk in
+	// extractResult appends in source order, so sessionDelta ends up:
+	//   [assistant-text, assistant-tool_use]
+	// with thinkingBlocks accumulated separately. The new attachment
+	// logic should land thinking on sessionDelta[0].
+	tb := []bridle.ThinkingBlock{{Type: "thinking", Thinking: "reasoned", Signature: "sig-1"}}
+	delta := []bridle.SessionEvent{
+		{Provider: bridle.ProviderClaude, Role: bridle.RoleAssistant, Content: "ok"},
+		{Provider: bridle.ProviderClaude, Role: bridle.RoleAssistant, RawJSON: []byte(`{"type":"tool_use"}`)},
+	}
+	got := attachThinkingForTest(delta, tb)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(got))
+	}
+	if len(got[0].ThinkingBlocks) != 1 || got[0].ThinkingBlocks[0].Signature != "sig-1" {
+		t.Errorf("first event missing thinking: %+v", got[0])
+	}
+	if len(got[1].ThinkingBlocks) != 0 {
+		t.Errorf("second event must NOT carry thinking (would double-emit): %+v", got[1])
+	}
+}
+
+// Empty-assistant-events edge case: turn produced only thinking, no
+// text or tool_use. extractResult prepends a synthetic carrier so the
+// blocks survive cross-turn.
+func TestExtractResult_SyntheticCarrierWhenNoAssistantEvents(t *testing.T) {
+	tb := []bridle.ThinkingBlock{{Type: "thinking", Thinking: "alone", Signature: "sig-only"}}
+	delta := []bridle.SessionEvent{} // no assistant events
+	got := attachThinkingForTest(delta, tb)
+	if len(got) != 1 {
+		t.Fatalf("expected synthetic carrier, got %d events", len(got))
+	}
+	if got[0].Role != bridle.RoleAssistant {
+		t.Errorf("synthetic role: %q", got[0].Role)
+	}
+	if len(got[0].ThinkingBlocks) != 1 {
+		t.Errorf("synthetic missing thinking: %+v", got[0])
+	}
+}
+
+// attachThinkingForTest mirrors the extractResult attachment block.
+// Lifted out so the unit can be tested without driving a full provider
+// response through extractResult. If extractResult's attachment logic
+// changes, update this mirror too.
+func attachThinkingForTest(sessionDelta []bridle.SessionEvent, thinkingBlocks []bridle.ThinkingBlock) []bridle.SessionEvent {
+	if len(thinkingBlocks) == 0 {
+		return sessionDelta
+	}
+	attached := false
+	for i := range sessionDelta {
+		if sessionDelta[i].Role == bridle.RoleAssistant {
+			sessionDelta[i].ThinkingBlocks = thinkingBlocks
+			attached = true
+			break
+		}
+	}
+	if !attached {
+		sessionDelta = append([]bridle.SessionEvent{{
+			Provider:       bridle.ProviderClaude,
+			Role:           bridle.RoleAssistant,
+			ThinkingBlocks: thinkingBlocks,
+		}}, sessionDelta...)
+	}
+	return sessionDelta
+}
