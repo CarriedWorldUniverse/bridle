@@ -162,10 +162,17 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 		// tool_results without the preceding assistant turn is rejected.
 		// finalText may be empty for tool-only assistant turns — that's fine,
 		// providers emit a content-less assistant message with just tool_use.
+		//
+		// NEX-320: thread ThinkingBlocks through so claude's
+		// toClaudeMessages can re-emit them in the next API call.
+		// Anthropic API rejects multi-turn requests whose history is
+		// missing the thinking blocks from prior assistant turns.
+		// Other providers ignore the field.
 		preq.Messages = append(preq.Messages, ProviderMessage{
-			Role:      "assistant",
-			Content:   finalText,
-			ToolCalls: presult.ToolCalls,
+			Role:           "assistant",
+			Content:        finalText,
+			ToolCalls:      presult.ToolCalls,
+			ThinkingBlocks: presult.ThinkingBlocks,
 		})
 
 		// Append tool results to message history.
