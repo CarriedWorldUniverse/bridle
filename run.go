@@ -289,9 +289,15 @@ func lowerRequest(req TurnRequest) ProviderRequest {
 	var messages []ProviderMessage
 
 	for _, e := range req.SessionTail {
+		// NEX-320 cross-turn: carry thinking blocks attached to assistant
+		// SessionEvents into the rebuilt ProviderMessage so claude's
+		// toClaudeMessages can re-emit them. Anthropic API rejects
+		// multi-turn requests whose assistant history is missing the
+		// thinking blocks from prior thinking-mode turns.
 		messages = append(messages, ProviderMessage{
-			Role:    string(e.Role),
-			Content: e.Content,
+			Role:           string(e.Role),
+			Content:        e.Content,
+			ThinkingBlocks: e.ThinkingBlocks,
 		})
 	}
 
