@@ -163,6 +163,7 @@ func extractResult(msg *anthropic.Message) (bridle.ProviderResult, error) {
 	var finalText string
 	var toolCalls []bridle.ToolInvocation
 	var sessionDelta []bridle.SessionEvent
+	var thinkingBlocks []bridle.ThinkingBlock
 
 	for _, block := range msg.Content {
 		switch b := block.AsAny().(type) {
@@ -181,6 +182,26 @@ func extractResult(msg *anthropic.Message) (bridle.ProviderResult, error) {
 				Role:     bridle.RoleAssistant,
 				RawJSON:  raw,
 			})
+
+		case anthropic.ThinkingBlock:
+			// NEX-320: capture extended-thinking blocks so the harness
+			// can re-emit them on the next turn. Anthropic API requires
+			// these survive multi-turn round-trip; without preservation
+			// the API rejects subsequent turns with 400.
+			thinkingBlocks = append(thinkingBlocks, bridle.ThinkingBlock{
+				Type:      "thinking",
+				Thinking:  b.Thinking,
+				Signature: b.Signature,
+			})
+
+		case anthropic.RedactedThinkingBlock:
+			// NEX-320: redacted variant — opaque encrypted blob the
+			// safety classifier may swap in for the plaintext. Still
+			// must be passed back verbatim on the next turn.
+			thinkingBlocks = append(thinkingBlocks, bridle.ThinkingBlock{
+				Type: "redacted_thinking",
+				Data: b.Data,
+			})
 		}
 	}
 
@@ -195,9 +216,10 @@ func extractResult(msg *anthropic.Message) (bridle.ProviderResult, error) {
 			CacheReadInputTokens:     int(msg.Usage.CacheReadInputTokens),
 			CacheCreationInputTokens: int(msg.Usage.CacheCreationInputTokens),
 		},
-		StopReason:    stopReason,
-		ResolvedModel: string(msg.Model),
-		SessionDelta:  sessionDelta,
+		StopReason:     stopReason,
+		ResolvedModel:  string(msg.Model),
+		SessionDelta:   sessionDelta,
+		ThinkingBlocks: thinkingBlocks,
 	}, nil
 }
 
@@ -211,6 +233,21 @@ func toClaudeMessages(msgs []bridle.ProviderMessage) ([]anthropic.MessageParam, 
 			))
 		case "assistant":
 			blocks := []anthropic.ContentBlockParamUnion{}
+			// NEX-320: thinking blocks must come FIRST per Anthropic
+			// API spec — they precede text and tool_use in the
+			// original response, and the API rejects history where
+			// the block order is shuffled. Re-emit in original order
+			// (slice preserves it).
+			for _, tb := range m.ThinkingBlocks {
+				switch tb.Type {
+				case "redacted_thinking":
+					blocks = append(blocks, anthropic.NewRedactedThinkingBlock(tb.Data))
+				default:
+					// "thinking" (or empty → treat as plaintext for
+					// forward-compat with future block subtypes).
+					blocks = append(blocks, anthropic.NewThinkingBlock(tb.Signature, tb.Thinking))
+				}
+			}
 			if m.Content != "" {
 				blocks = append(blocks, anthropic.NewTextBlock(m.Content))
 			}

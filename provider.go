@@ -129,6 +129,40 @@ type ProviderMessage struct {
 	ToolCallID string           // links a tool_result back to the call that produced it
 	ToolName   string           // function-declaration name; required for tool_result on Gemini
 	ToolCalls  []ToolInvocation // tool_use blocks for assistant turns; nil on other roles
+
+	// ThinkingBlocks (NEX-320) preserves Claude extended-thinking
+	// content blocks across turns. Required by the Anthropic API:
+	// subsequent turns whose conversation history is missing the
+	// thinking blocks from prior assistant turns get rejected with
+	// 400 ("content[].thinking in the thinking mode must be passed
+	// back to the API"). Providers without thinking-mode support
+	// (OpenAI, Gemini, claudecode subprocess) ignore this field;
+	// nil/empty when thinking wasn't engaged or for non-assistant
+	// roles. Order is preserved — Anthropic requires thinking blocks
+	// appear BEFORE text/tool_use blocks in the reconstructed turn.
+	ThinkingBlocks []ThinkingBlock
+}
+
+// ThinkingBlock is one extended-thinking content block returned by
+// Claude when thinking mode is enabled (NEX-320). Type discriminates
+// "thinking" (plaintext + cryptographic signature) from
+// "redacted_thinking" (opaque encrypted payload Anthropic's safety
+// classifier may swap in). Both must be passed back verbatim on
+// subsequent turns — the signature/data is what the API authenticates
+// against to confirm the block originated from the prior server response.
+type ThinkingBlock struct {
+	// Type is "thinking" or "redacted_thinking".
+	Type string
+	// Thinking is the plaintext reasoning content (Type=="thinking" only).
+	Thinking string
+	// Signature is the server-provided cryptographic signature; must
+	// be sent back verbatim. (Type=="thinking" only.)
+	Signature string
+	// Data is the opaque encrypted payload (Type=="redacted_thinking"
+	// only). Anthropic's safety filter swaps in a redacted block when
+	// it judges the plaintext shouldn't reach the caller; the API
+	// still requires it on round-trip.
+	Data string
 }
 
 // ProviderResult is the harness-internal result from one provider turn step.
@@ -165,4 +199,11 @@ type ProviderResult struct {
 	// elsewhere. Empty when the provider doesn't surface a model id.
 	// Flows into TurnResult.ResolvedModel.
 	ResolvedModel string
+	// ThinkingBlocks (NEX-320) carries Claude extended-thinking content
+	// blocks from this turn. The harness threads them into the next
+	// turn's ProviderMessage so toClaudeMessages can re-emit them —
+	// the Anthropic API requires they survive multi-turn round-trip.
+	// Nil/empty when the provider doesn't support thinking mode OR
+	// when this turn produced none.
+	ThinkingBlocks []ThinkingBlock
 }
