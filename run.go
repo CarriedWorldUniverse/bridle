@@ -446,6 +446,23 @@ func parseSessionToolCall(e SessionEvent) (ToolInvocation, bool) {
 			Name: tc.Function.Name,
 			Args: json.RawMessage(tc.Function.Arguments),
 		}, true
+	case ProviderClaude:
+		// Claude stores the marshaled anthropic.ToolUseBlock:
+		// { "id":..., "name":..., "input": {...}, "type": "tool_use" }
+		var tu struct {
+			Type  string          `json:"type"`
+			ID    string          `json:"id"`
+			Name  string          `json:"name"`
+			Input json.RawMessage `json:"input"`
+		}
+		if err := json.Unmarshal(e.RawJSON, &tu); err != nil || tu.Type != "tool_use" || tu.Name == "" {
+			return ToolInvocation{}, false
+		}
+		return ToolInvocation{
+			ID:   tu.ID,
+			Name: tu.Name,
+			Args: tu.Input,
+		}, true
 	}
 	return ToolInvocation{}, false
 }
