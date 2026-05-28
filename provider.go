@@ -141,6 +141,21 @@ type ProviderMessage struct {
 	// roles. Order is preserved — Anthropic requires thinking blocks
 	// appear BEFORE text/tool_use blocks in the reconstructed turn.
 	ThinkingBlocks []ThinkingBlock
+
+	// ReasoningContent (NEX-340) is the openai-shape parallel of
+	// ThinkingBlocks for DeepSeek reasoner-style models. DeepSeek's
+	// `/v1` returns an assistant message with a `reasoning_content`
+	// string field (extension to OpenAI Chat Completions wire) on
+	// reasoning models like deepseek-v4-pro. Subsequent turns whose
+	// assistant history is missing this field get rejected with
+	// 400 ("The reasoning_content in the thinking mode must be
+	// passed back to the API").
+	//
+	// Providers without reasoning_content support (vanilla OpenAI,
+	// Anthropic, Gemini, claudecode) ignore this field. Empty when
+	// the prior turn was a non-reasoning model or for non-assistant
+	// roles.
+	ReasoningContent string
 }
 
 // ThinkingBlock is one extended-thinking content block returned by

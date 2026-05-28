@@ -370,3 +370,81 @@ func (r *recordingSink) Emit(ev bridle.Event) {
 		r.sawTurnDone = true
 	}
 }
+
+// NEX-340 live: multi-turn against DeepSeek's reasoner model
+// (deepseek-v4-pro / deepseek-reasoner). The reasoner emits
+// reasoning_content; turn 2 carries it back via SessionTail. Without
+// the NEX-340 fix, DeepSeek 400s with "reasoning_content must be
+// passed back to the API". With the fix, turn 2 lands cleanly.
+//
+// Env-gated on DEEPSEEK_REASONER_KEY since this needs a DeepSeek
+// account + a reasoner model. Falls through to DEEPSEEK_OPENAI_API_KEY
+// if not set separately, since both routes use the same DeepSeek key
+// in practice.
+func TestLive_OpenAI_DeepSeekReasonerMultiTurn(t *testing.T) {
+	key := getenv("DEEPSEEK_REASONER_KEY", "DEEPSEEK_OPENAI_API_KEY")
+	if key == "" {
+		t.Skip("DEEPSEEK_REASONER_KEY (or DEEPSEEK_OPENAI_API_KEY) not set; skipping live reasoner test")
+	}
+	model := getenv("DEEPSEEK_REASONER_MODEL", "")
+	if model == "" {
+		model = "deepseek-reasoner" // public model id; deepseek-v4-pro is the nexus alias for it
+	}
+	p := openai.NewWithBaseURL(key, "https://api.deepseek.com/v1")
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	h := bridle.NewHarness(p)
+
+	r1, err := h.RunTurn(ctx, bridle.TurnRequest{
+		Model:       model,
+		UserMessage: "Remember the number 42 for me. Reply with just 'ok'.",
+		MaxSteps:    1,
+	}, noopRunner{}, nullSink{})
+	if err != nil {
+		t.Fatalf("turn 1 RunTurn: %v", err)
+	}
+	if r1.FinalText == "" {
+		t.Fatalf("turn 1 FinalText empty")
+	}
+
+	// Sanity: the reasoner should have emitted reasoning_content
+	// somewhere in SessionDelta. If this assertion fails, the model
+	// isn't actually a reasoner OR our extraction is broken — either
+	// way, the cross-turn test below would silently pass without
+	// actually exercising the bug. Belt + braces.
+	sawReasoning := false
+	for _, e := range r1.SessionDelta {
+		if e.ReasoningContent != "" {
+			sawReasoning = true
+			break
+		}
+	}
+	if !sawReasoning {
+		t.Logf("turn 1 SessionDelta carries no reasoning_content — model %q may not be a reasoner; downstream assertion is weaker than intended", model)
+	}
+
+	tail := []bridle.SessionEvent{
+		{Provider: bridle.ProviderOpenAI, Role: bridle.RoleUser, Content: "Remember the number 42 for me. Reply with just 'ok'."},
+	}
+	tail = append(tail, r1.SessionDelta...)
+
+	r2, err := h.RunTurn(ctx, bridle.TurnRequest{
+		Model:       model,
+		SessionTail: tail,
+		UserMessage: "What number did I ask you to remember? Just the digits.",
+		MaxSteps:    1,
+	}, noopRunner{}, nullSink{})
+	if err != nil {
+		t.Fatalf("turn 2 RunTurn (the exact path NEX-340 fixes): %v", err)
+	}
+	if !strings.Contains(r2.FinalText, "42") {
+		t.Errorf("turn 2 didn't recall context; FinalText=%q", r2.FinalText)
+	}
+}
+
+func getenv(primary, fallback string) string {
+	if v := os.Getenv(primary); v != "" {
+		return v
+	}
+	return os.Getenv(fallback)
+}

@@ -294,10 +294,15 @@ func lowerRequest(req TurnRequest) ProviderRequest {
 		// toClaudeMessages can re-emit them. Anthropic API rejects
 		// multi-turn requests whose assistant history is missing the
 		// thinking blocks from prior thinking-mode turns.
+		//
+		// NEX-340 cross-turn: same shape on the openai side for DeepSeek
+		// reasoner-style models — carry reasoning_content so the openai
+		// provider's toOpenAIMessages can re-emit it.
 		messages = append(messages, ProviderMessage{
-			Role:           string(e.Role),
-			Content:        e.Content,
-			ThinkingBlocks: e.ThinkingBlocks,
+			Role:             string(e.Role),
+			Content:          e.Content,
+			ThinkingBlocks:   e.ThinkingBlocks,
+			ReasoningContent: e.ReasoningContent,
 		})
 	}
 
