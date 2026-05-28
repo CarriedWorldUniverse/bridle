@@ -286,6 +286,62 @@ func TestLive_OpenAI_ModelNotFound(t *testing.T) {
 	}
 }
 
+// TestLive_OpenAI_MultiTurnViaSessionTail validates that a second
+// Deliberate-equivalent call carrying SessionTail from a prior turn
+// gets accepted by the provider. This is the exact path that breaks
+// the dMon agents today on the claude-code+DeepSeek-anthropic-shim
+// path (NEX-320 thinking-block 400). On the openai+DeepSeek-v1 path
+// thinking blocks don't exist, so the cross-turn replay should
+// trivially succeed — confirming the recommended migration target.
+//
+// Test shape: turn 1 establishes a fact; turn 2 (with turn 1's
+// assistant reply replayed via SessionTail) asks a follow-up that
+// only makes sense if the prior context is preserved.
+func TestLive_OpenAI_MultiTurnViaSessionTail(t *testing.T) {
+	for _, c := range shapeConfigs {
+		t.Run(c.name, func(t *testing.T) {
+			p, ctx, cancel := liveProvider(t, c)
+			defer cancel()
+			h := bridle.NewHarness(p)
+
+			// Turn 1: establish a fact.
+			r1, err := h.RunTurn(ctx, bridle.TurnRequest{
+				Model:       c.model,
+				UserMessage: "Remember this number for later: 42. Reply with just 'ok'.",
+				MaxSteps:    1,
+			}, noopRunner{}, nullSink{})
+			if err != nil {
+				t.Fatalf("turn 1 RunTurn: %v", err)
+			}
+			if r1.FinalText == "" {
+				t.Fatalf("turn 1 FinalText empty")
+			}
+
+			// Build the cross-Deliberate SessionTail the funnel would
+			// hand to the next turn: prior user + prior assistant
+			// (lifted from sessionDelta).
+			tail := []bridle.SessionEvent{
+				{Provider: bridle.ProviderOpenAI, Role: bridle.RoleUser, Content: "Remember this number for later: 42. Reply with just 'ok'."},
+			}
+			tail = append(tail, r1.SessionDelta...)
+
+			// Turn 2: follow-up that only resolves with prior context.
+			r2, err := h.RunTurn(ctx, bridle.TurnRequest{
+				Model:       c.model,
+				SessionTail: tail,
+				UserMessage: "What number did I ask you to remember? Reply with just the digits.",
+				MaxSteps:    1,
+			}, noopRunner{}, nullSink{})
+			if err != nil {
+				t.Fatalf("turn 2 RunTurn: %v", err)
+			}
+			if !strings.Contains(r2.FinalText, "42") {
+				t.Errorf("turn 2 did not recall context; FinalText=%q", r2.FinalText)
+			}
+		})
+	}
+}
+
 type noopRunner struct{}
 
 func (noopRunner) Run(_ context.Context, _ bridle.ToolCall) (json.RawMessage, error) {
