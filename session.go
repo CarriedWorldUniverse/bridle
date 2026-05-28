@@ -158,4 +158,15 @@ type SessionEvent struct {
 	// (old entries decode with empty slice; cross-turn replay no-ops
 	// when nil).
 	ThinkingBlocks []ThinkingBlock `json:"thinking_blocks,omitempty"`
+
+	// ReasoningContent (NEX-340) is the openai-shape parallel of
+	// ThinkingBlocks for DeepSeek reasoner-style models. Same shape
+	// of requirement: subsequent turns whose assistant history loses
+	// the reasoning_content field get rejected with 400
+	// ("The reasoning_content in the thinking mode must be passed
+	// back to the API"). Attached to the FIRST assistant SessionEvent
+	// of each turn so lowerRequest can re-emit on the corresponding
+	// ProviderMessage. omitempty preserves back-compat for non-
+	// reasoning sessions and non-openai-shape providers.
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }

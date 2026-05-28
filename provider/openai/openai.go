@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
@@ -121,6 +122,13 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 
 	stream := p.getClient().Chat.Completions.NewStreaming(ctx, params)
 	acc := openai.ChatCompletionAccumulator{}
+	// NEX-340: DeepSeek emits reasoning_content as per-chunk deltas
+	// (ChatCompletionChunkChoiceDelta.JSON.ExtraFields["reasoning_content"]).
+	// The SDK's ChatCompletionAccumulator folds the typed fields into
+	// the final ChatCompletion but doesn't carry ExtraFields through.
+	// Accumulate locally so extractResult can attach the full
+	// reasoning text to the SessionDelta for cross-turn replay.
+	var reasoningBuf strings.Builder
 	for stream.Next() {
 		chunk := stream.Current()
 		if !acc.AddChunk(chunk) {
@@ -131,19 +139,31 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
 			sink.Emit(bridle.ModelChunk{Text: chunk.Choices[0].Delta.Content})
 		}
+		// Capture reasoning_content delta if present (DeepSeek reasoner).
+		if len(chunk.Choices) > 0 {
+			if rc, ok := chunk.Choices[0].Delta.JSON.ExtraFields["reasoning_content"]; ok {
+				raw := rc.Raw()
+				if raw != "" && raw != "null" {
+					var piece string
+					if json.Unmarshal([]byte(raw), &piece) == nil {
+						reasoningBuf.WriteString(piece)
+					}
+				}
+			}
+		}
 	}
 	if err := stream.Err(); err != nil {
 		return bridle.ProviderResult{}, fmt.Errorf("openai: API error: %w", err)
 	}
 
-	return extractResult(&acc.ChatCompletion)
+	return extractResult(&acc.ChatCompletion, reasoningBuf.String())
 }
 
 // extractResult pulls finalText/toolCalls/usage out of an accumulated
 // ChatCompletion. Chunks were already emitted live during the stream
 // loop, so this just lowers the assembled completion into a
 // bridle.ProviderResult.
-func extractResult(completion *openai.ChatCompletion) (bridle.ProviderResult, error) {
+func extractResult(completion *openai.ChatCompletion, streamReasoning string) (bridle.ProviderResult, error) {
 	if len(completion.Choices) == 0 {
 		return bridle.ProviderResult{StopReason: bridle.StopReasonModelDone}, nil
 	}
@@ -174,6 +194,41 @@ func extractResult(completion *openai.ChatCompletion) (bridle.ProviderResult, er
 		})
 	}
 
+	// NEX-340: DeepSeek reasoner-style models emit `reasoning_content`
+	// per-chunk during streaming (extension to OpenAI Chat Completions
+	// wire). The caller accumulates the deltas; we prefer that
+	// streamed-accumulated text. As a fallback (non-streaming, or
+	// providers that surface it on the final message) we also check
+	// msg.JSON.ExtraFields. Attached to the FIRST assistant
+	// SessionEvent so cross-Deliberate replay (lowerRequest) preserves
+	// it. DeepSeek's API rejects subsequent turns whose assistant
+	// history is missing the reasoning_content with 400
+	// ("The reasoning_content in the thinking mode must be passed
+	// back to the API"). Mirrors NEX-320 attachment pattern.
+	reasoning := streamReasoning
+	if reasoning == "" {
+		reasoning = extractReasoningContent(msg)
+	}
+	if reasoning != "" {
+		attached := false
+		for i := range sessionDelta {
+			if sessionDelta[i].Role == bridle.RoleAssistant {
+				sessionDelta[i].ReasoningContent = reasoning
+				attached = true
+				break
+			}
+		}
+		if !attached {
+			// Reasoning-only turn (no text, no tool_use) — synthesize a
+			// carrier event so the blocks survive cross-turn replay.
+			sessionDelta = append([]bridle.SessionEvent{{
+				Provider:         bridle.ProviderOpenAI,
+				Role:             bridle.RoleAssistant,
+				ReasoningContent: reasoning,
+			}}, sessionDelta...)
+		}
+	}
+
 	stopReason := normalize.OpenAIStopReason(string(choice.FinishReason))
 
 	return bridle.ProviderResult{
@@ -189,6 +244,31 @@ func extractResult(completion *openai.ChatCompletion) (bridle.ProviderResult, er
 	}, nil
 }
 
+// extractReasoningContent reads DeepSeek's reasoning_content extension
+// field from an openai-go ChatCompletionMessage. Returns "" when the
+// field is absent or empty — non-reasoning models (vanilla OpenAI,
+// DeepSeek chat/flash variants) won't have it.
+//
+// Note: ExtraFields entries land at status=invalid (the SDK only marks
+// status=valid for typed fields it knows about), so the Valid() guard
+// applied to known fields doesn't apply here — Raw() is the
+// authoritative check.
+func extractReasoningContent(msg openai.ChatCompletionMessage) string {
+	rc, ok := msg.JSON.ExtraFields["reasoning_content"]
+	if !ok {
+		return ""
+	}
+	raw := rc.Raw()
+	if raw == "" || raw == "null" {
+		return ""
+	}
+	var out string
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return ""
+	}
+	return out
+}
+
 func toOpenAIMessages(systemPrompt string, msgs []bridle.ProviderMessage) []openai.ChatCompletionMessageParamUnion {
 	var out []openai.ChatCompletionMessageParamUnion
 
@@ -201,7 +281,7 @@ func toOpenAIMessages(systemPrompt string, msgs []bridle.ProviderMessage) []open
 		case "user":
 			out = append(out, openai.UserMessage(m.Content))
 		case "assistant":
-			if m.Content == "" && len(m.ToolCalls) == 0 {
+			if m.Content == "" && len(m.ToolCalls) == 0 && m.ReasoningContent == "" {
 				continue
 			}
 			var assistant openai.ChatCompletionAssistantMessageParam
@@ -220,6 +300,16 @@ func toOpenAIMessages(systemPrompt string, msgs []bridle.ProviderMessage) []open
 					})
 				}
 				assistant.ToolCalls = tcs
+			}
+			// NEX-340: DeepSeek requires reasoning_content round-tripped
+			// on prior assistant turns. SDK doesn't have a typed field
+			// for it (it's a DeepSeek-only extension to OpenAI Chat
+			// Completions), so we inject via SetExtraFields. No-op for
+			// non-reasoning history.
+			if m.ReasoningContent != "" {
+				assistant.SetExtraFields(map[string]any{
+					"reasoning_content": m.ReasoningContent,
+				})
 			}
 			out = append(out, openai.ChatCompletionMessageParamUnion{OfAssistant: &assistant})
 		case "tool_result":
