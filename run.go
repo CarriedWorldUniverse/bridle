@@ -134,7 +134,12 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 			}
 			allInvocations = append(allInvocations, completed)
 			toolMessages = append(toolMessages, toolMsg)
-			sessionDelta = append(sessionDelta, SessionEvent{Provider: h.provider.Name(), Role: RoleTool, Content: toolMsg.Content})
+			sessionDelta = append(sessionDelta, SessionEvent{
+				Provider:   h.provider.Name(),
+				Role:       RoleTool,
+				Content:    toolMsg.Content,
+				ToolCallID: completed.ID,
+			})
 		}
 
 		stepCount++
@@ -305,12 +310,59 @@ func lowerRequest(req TurnRequest) ProviderRequest {
 		// NEX-340 cross-turn: same shape on the openai side for DeepSeek
 		// reasoner-style models — carry reasoning_content so the openai
 		// provider's toOpenAIMessages can re-emit it.
-		messages = append(messages, ProviderMessage{
-			Role:             string(e.Role),
-			Content:          e.Content,
-			ThinkingBlocks:   e.ThinkingBlocks,
-			ReasoningContent: e.ReasoningContent,
-		})
+		//
+		// Tool-use cross-turn: a prior turn's assistant tool_use blocks
+		// were flattened into one SessionEvent per call (RawJSON-bearing).
+		// Strict providers (OpenAI/DeepSeek, Bedrock) require those
+		// reconstituted as a single assistant message with structured
+		// tool_calls, not N separate messages, and require tool_results
+		// keyed by the original call id. Coalesce consecutive assistant
+		// events into one ProviderMessage; parse RawJSON into ToolCalls
+		// per the event's Provider shape.
+		switch e.Role {
+		case RoleAssistant:
+			tc, hasToolCall := parseSessionToolCall(e)
+			if n := len(messages); n > 0 && messages[n-1].Role == "assistant" {
+				last := &messages[n-1]
+				if e.Content != "" {
+					if last.Content != "" {
+						last.Content += "\n"
+					}
+					last.Content += e.Content
+				}
+				if len(e.ThinkingBlocks) > 0 {
+					last.ThinkingBlocks = append(last.ThinkingBlocks, e.ThinkingBlocks...)
+				}
+				if e.ReasoningContent != "" && last.ReasoningContent == "" {
+					last.ReasoningContent = e.ReasoningContent
+				}
+				if hasToolCall {
+					last.ToolCalls = append(last.ToolCalls, tc)
+				}
+				continue
+			}
+			msg := ProviderMessage{
+				Role:             "assistant",
+				Content:          e.Content,
+				ThinkingBlocks:   e.ThinkingBlocks,
+				ReasoningContent: e.ReasoningContent,
+			}
+			if hasToolCall {
+				msg.ToolCalls = []ToolInvocation{tc}
+			}
+			messages = append(messages, msg)
+		case RoleTool:
+			messages = append(messages, ProviderMessage{
+				Role:       "tool_result",
+				Content:    e.Content,
+				ToolCallID: e.ToolCallID,
+			})
+		default:
+			messages = append(messages, ProviderMessage{
+				Role:    string(e.Role),
+				Content: e.Content,
+			})
+		}
 	}
 
 	if len(req.Inbox) > 0 {
@@ -356,6 +408,46 @@ func lowerRequest(req TurnRequest) ProviderRequest {
 		StopSequences:   req.StopSequences,
 		ResponseFormat:  req.ResponseFormat,
 	}
+}
+
+// parseSessionToolCall reconstructs a ToolInvocation from an assistant
+// SessionEvent's RawJSON when the event represents a prior-turn tool_use
+// block. Returns (zero, false) when the event isn't a parseable tool
+// call OR when bridle doesn't yet know the provider's RawJSON shape.
+//
+// Used by lowerRequest to rebuild structured ToolCalls on the cross-
+// turn replay path — without it, the rebuilt assistant ProviderMessage
+// has neither Content nor ToolCalls, and providers reject it as
+// malformed.
+//
+// Per-provider RawJSON shape is set by the provider's extractResult /
+// equivalent; the unmarshal targets here must stay in sync with that.
+// Today only ProviderOpenAI is wired — the rest fall through to false
+// (the cross-turn tool replay path isn't exercised for them yet; add
+// when needed).
+func parseSessionToolCall(e SessionEvent) (ToolInvocation, bool) {
+	if e.Role != RoleAssistant || len(e.RawJSON) == 0 {
+		return ToolInvocation{}, false
+	}
+	switch e.Provider {
+	case ProviderOpenAI:
+		var tc struct {
+			ID       string `json:"id"`
+			Function struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			} `json:"function"`
+		}
+		if err := json.Unmarshal(e.RawJSON, &tc); err != nil || tc.Function.Name == "" {
+			return ToolInvocation{}, false
+		}
+		return ToolInvocation{
+			ID:   tc.ID,
+			Name: tc.Function.Name,
+			Args: json.RawMessage(tc.Function.Arguments),
+		}, true
+	}
+	return ToolInvocation{}, false
 }
 
 func addUsage(a, b Usage) Usage {

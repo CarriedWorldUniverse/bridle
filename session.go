@@ -169,4 +169,13 @@ type SessionEvent struct {
 	// ProviderMessage. omitempty preserves back-compat for non-
 	// reasoning sessions and non-openai-shape providers.
 	ReasoningContent string `json:"reasoning_content,omitempty"`
+
+	// ToolCallID links a tool-result SessionEvent (Role==RoleTool)
+	// back to the assistant tool_use that produced it. Required for
+	// cross-turn replay through SessionTail: providers that use call-
+	// id correlation (Anthropic, OpenAI, Ollama) need this on the
+	// reconstructed tool_result ProviderMessage. Empty for non-tool
+	// events. Without it, lowerRequest can't pair tool_results with
+	// their tool_calls and the API rejects the rebuilt history.
+	ToolCallID string `json:"tool_call_id,omitempty"`
 }
