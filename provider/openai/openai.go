@@ -282,7 +282,15 @@ func toOpenAIMessages(systemPrompt string, msgs []bridle.ProviderMessage) []open
 		case "user":
 			out = append(out, openai.UserMessage(m.Content))
 		case "assistant":
-			if m.Content == "" && len(m.ToolCalls) == 0 && m.ReasoningContent == "" {
+			// OpenAI wire spec: an assistant message MUST carry either
+			// content or tool_calls. reasoning_content alone is not a
+			// valid body — DeepSeek rejects with "Invalid assistant
+			// message: content or tool_calls must be set" 400. Drop
+			// reasoning-only carriers rather than emit malformed wire;
+			// without a content/tool_calls anchor there's no server
+			// turn for reasoning_content to attach to in the first
+			// place, so dropping it is also semantically correct.
+			if m.Content == "" && len(m.ToolCalls) == 0 {
 				continue
 			}
 			var assistant openai.ChatCompletionAssistantMessageParam
