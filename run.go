@@ -168,11 +168,18 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 		// Anthropic API rejects multi-turn requests whose history is
 		// missing the thinking blocks from prior assistant turns.
 		// Other providers ignore the field.
+		//
+		// NEX-340: same shape on the openai side — DeepSeek's reasoner
+		// models require reasoning_content to round-trip on the in-turn
+		// follow-up call after a tool_call. Without this, step 2 hits
+		// "The reasoning_content in the thinking mode must be passed
+		// back to the API" 400.
 		preq.Messages = append(preq.Messages, ProviderMessage{
-			Role:           "assistant",
-			Content:        finalText,
-			ToolCalls:      presult.ToolCalls,
-			ThinkingBlocks: presult.ThinkingBlocks,
+			Role:             "assistant",
+			Content:          finalText,
+			ToolCalls:        presult.ToolCalls,
+			ThinkingBlocks:   presult.ThinkingBlocks,
+			ReasoningContent: presult.ReasoningContent,
 		})
 
 		// Append tool results to message history.

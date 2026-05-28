@@ -238,9 +238,10 @@ func extractResult(completion *openai.ChatCompletion, streamReasoning string) (b
 			InputTokens:  int(completion.Usage.PromptTokens),
 			OutputTokens: int(completion.Usage.CompletionTokens),
 		},
-		StopReason:    stopReason,
-		ResolvedModel: completion.Model,
-		SessionDelta:  sessionDelta,
+		StopReason:       stopReason,
+		ResolvedModel:    completion.Model,
+		SessionDelta:     sessionDelta,
+		ReasoningContent: reasoning,
 	}, nil
 }
 

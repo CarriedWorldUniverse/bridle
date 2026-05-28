@@ -442,6 +442,47 @@ func TestLive_OpenAI_DeepSeekReasonerMultiTurn(t *testing.T) {
 	}
 }
 
+// TestLive_OpenAI_DeepSeekReasonerToolRoundtrip — covers the IN-TURN
+// step-2 reasoning_content round-trip. After the reasoner emits a
+// tool_call (step 1), bridle reconstructs the assistant message and
+// invokes the provider again with the tool_result appended (step 2).
+// Without ReasoningContent threaded into that reconstruction, DeepSeek
+// rejects step 2 with "The reasoning_content in the thinking mode must
+// be passed back to the API". This test fails on the pre-NEX-340-fix
+// run.go path and passes once `ReasoningContent: presult.ReasoningContent`
+// is added to the assistant reconstruction.
+func TestLive_OpenAI_DeepSeekReasonerToolRoundtrip(t *testing.T) {
+	key := getenv("DEEPSEEK_REASONER_KEY", "DEEPSEEK_OPENAI_API_KEY")
+	if key == "" {
+		t.Skip("DEEPSEEK_REASONER_KEY (or DEEPSEEK_OPENAI_API_KEY) not set; skipping live reasoner tool test")
+	}
+	model := getenv("DEEPSEEK_REASONER_MODEL", "")
+	if model == "" {
+		model = "deepseek-reasoner"
+	}
+	p := openai.NewWithBaseURL(key, "https://api.deepseek.com/v1")
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	h := bridle.NewHarness(p)
+
+	result, err := h.RunTurn(ctx, bridle.TurnRequest{
+		Model:       model,
+		UserMessage: `Call the echo tool with text="ping" and report what you got back.`,
+		MaxSteps:    3,
+		Tools: []bridle.ToolDef{{
+			Name:        "echo",
+			Description: "Echo back the input.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}`),
+		}},
+	}, echoRunner{}, nullSink{})
+	if err != nil {
+		t.Fatalf("reasoner tool roundtrip RunTurn: %v", err)
+	}
+	if len(result.ToolCalls) == 0 {
+		t.Errorf("expected at least one tool call from reasoner; got 0")
+	}
+}
+
 func getenv(primary, fallback string) string {
 	if v := os.Getenv(primary); v != "" {
 		return v
