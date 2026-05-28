@@ -221,4 +221,15 @@ type ProviderResult struct {
 	// Nil/empty when the provider doesn't support thinking mode OR
 	// when this turn produced none.
 	ThinkingBlocks []ThinkingBlock
+
+	// ReasoningContent (NEX-340) is the openai-shape parallel of
+	// ThinkingBlocks for DeepSeek reasoner-style models. The harness
+	// threads this into the next IN-TURN step's reconstructed
+	// assistant ProviderMessage (run.go tool-loop) so toOpenAIMessages
+	// can re-emit it on step 2+. DeepSeek's API rejects in-turn
+	// follow-up calls whose assistant{tool_call} reconstruction is
+	// missing this field with 400 ("The reasoning_content in the
+	// thinking mode must be passed back to the API"). Cross-turn
+	// replay flows through SessionDelta instead — see SessionEvent.
+	ReasoningContent string
 }
