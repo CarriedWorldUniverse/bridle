@@ -135,6 +135,11 @@ func (h *Harness) RegisterBeforeModelCall(fn Hook[BeforeModelCallCtx]) HookID {
 
 // RegisterBeforeToolCall adds a hook that fires before each tool
 // execution. Returns a HookID that can be passed to UnregisterHook.
+//
+// To refuse a single call without ending the turn, set in.Deny=true
+// (with in.Err / in.Result) and return HookContinue — see
+// BeforeToolCallCtx for the permission-deny pattern. Return HookAbort
+// only to kill the whole turn.
 func (h *Harness) RegisterBeforeToolCall(fn Hook[BeforeToolCallCtx]) HookID {
 	id := h.hooks.newID()
 	h.hooks.beforeToolCall = append(h.hooks.beforeToolCall, hookEntry[BeforeToolCallCtx]{id, fn})
