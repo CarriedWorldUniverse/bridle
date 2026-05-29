@@ -1,6 +1,9 @@
 package bridle
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // HookAction tells the harness what to do after a hook returns.
 type HookAction int
@@ -43,9 +46,43 @@ type BeforeModelCallCtx struct {
 }
 
 // BeforeToolCallCtx carries context passed to BeforeToolCall hooks.
+//
+// Permission-deny pattern: a BeforeToolCall hook can refuse a single
+// tool call without ending the turn by setting Deny=true (optionally
+// with Result and/or Err) and returning HookContinue. The harness then
+// SKIPS executing that call (no runner.Run, no MCP dispatch), builds the
+// tool_result from Result/Err, fires AfterToolCall for audit, and
+// continues the loop so the model sees the refusal and can react.
+// Contrast HookAbort, which ends the whole turn — use Deny for refusing
+// one call, HookAbort for killing the turn.
+//
+// Canonical hook:
+//
+//	h.RegisterBeforeToolCall(func(ctx context.Context, in bridle.BeforeToolCallCtx) (bridle.BeforeToolCallCtx, bridle.HookAction, error) {
+//		if !policy.Allows(in.Call) {
+//			in.Deny = true
+//			in.Err = "permission denied by policy: " + in.Call.Name
+//		}
+//		return in, bridle.HookContinue, nil
+//	})
 type BeforeToolCallCtx struct {
 	Call ToolCall
 	Step int
+
+	// Deny, when set true by a BeforeToolCall hook, tells the harness to
+	// SKIP executing this tool call and instead return Result/Err as the
+	// tool_result, then continue the loop so the model can react. Use this
+	// (with a returned HookContinue) for per-call permission denials —
+	// HookAbort ends the whole turn, which is not what a single-call
+	// denial wants. Defaults false: existing hooks are unaffected.
+	Deny bool
+	// Result is the tool_result JSON payload to hand back when Deny is
+	// set. nil is treated as JSON null. Ignored unless Deny is true.
+	Result json.RawMessage
+	// Err, when non-empty and Deny is set, marks the tool_result as an
+	// error string the model sees (mirrors a runner.Run error). Ignored
+	// unless Deny is true.
+	Err string
 }
 
 // AfterToolCallCtx carries context passed to AfterToolCall hooks.
@@ -98,6 +135,11 @@ func (h *Harness) RegisterBeforeModelCall(fn Hook[BeforeModelCallCtx]) HookID {
 
 // RegisterBeforeToolCall adds a hook that fires before each tool
 // execution. Returns a HookID that can be passed to UnregisterHook.
+//
+// To refuse a single call without ending the turn, set in.Deny=true
+// (with in.Err / in.Result) and return HookContinue — see
+// BeforeToolCallCtx for the permission-deny pattern. Return HookAbort
+// only to kill the whole turn.
 func (h *Harness) RegisterBeforeToolCall(fn Hook[BeforeToolCallCtx]) HookID {
 	id := h.hooks.newID()
 	h.hooks.beforeToolCall = append(h.hooks.beforeToolCall, hookEntry[BeforeToolCallCtx]{id, fn})

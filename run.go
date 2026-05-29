@@ -246,6 +246,50 @@ func (h *Harness) executeToolCall(
 	}
 	call = btc.Call
 
+	// Per-call deny: a BeforeToolCall hook set Deny=true (returning
+	// HookContinue). Skip runner.Run/MCP entirely, hand the model the
+	// hook-supplied Result/Err as the tool_result, still fire
+	// AfterToolCall (audit), and continue the loop — do NOT abort.
+	// Mirrors the normal-path tcr→toolMsg→completed construction below.
+	if btc.Deny {
+		sink.Emit(ToolCallStart{ID: call.ID, Name: call.Name, Args: call.Args})
+
+		resultJSON := btc.Result
+		if resultJSON == nil {
+			resultJSON = json.RawMessage(`null`)
+		}
+		tcr := ToolCallResult{ID: call.ID, Result: resultJSON, Err: btc.Err}
+		sink.Emit(tcr)
+
+		// AfterToolCall hook — fires on denied calls so observability
+		// sees the refusal.
+		atc := AfterToolCallCtx{Call: call, Result: tcr, Step: stepCount + 1}
+		atc, aborted, err = h.hooks.runAfterToolCall(ctx, atc)
+		if err != nil || aborted {
+			return
+		}
+
+		completed = ToolInvocation{
+			ID:     call.ID,
+			Name:   call.Name,
+			Args:   call.Args,
+			Result: atc.Result.Result,
+			Err:    atc.Result.Err,
+		}
+
+		resultStr := string(atc.Result.Result)
+		if atc.Result.Err != "" {
+			resultStr = fmt.Sprintf("error: %s", atc.Result.Err)
+		}
+		toolMsg = ProviderMessage{
+			Role:       "tool_result",
+			Content:    resultStr,
+			ToolCallID: call.ID,
+			ToolName:   call.Name, // required by Gemini's FunctionResponse contract; ignored by other providers
+		}
+		return
+	}
+
 	sink.Emit(ToolCallStart{ID: call.ID, Name: call.Name, Args: call.Args})
 
 	if ctx.Err() != nil {
