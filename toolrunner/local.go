@@ -67,9 +67,6 @@ func result(v any) (json.RawMessage, error) {
 	return b, nil
 }
 
-func (r *LocalToolRunner) runBash(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
-	return nil, fmt.Errorf("todo")
-}
 func (r *LocalToolRunner) runRead(args json.RawMessage) (json.RawMessage, error)  { return nil, fmt.Errorf("todo") }
 func (r *LocalToolRunner) runWrite(args json.RawMessage) (json.RawMessage, error) { return nil, fmt.Errorf("todo") }
 func (r *LocalToolRunner) runEdit(args json.RawMessage) (json.RawMessage, error)  { return nil, fmt.Errorf("todo") }
