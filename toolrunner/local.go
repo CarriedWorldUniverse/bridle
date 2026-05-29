@@ -67,9 +67,3 @@ func result(v any) (json.RawMessage, error) {
 	return b, nil
 }
 
-func (r *LocalToolRunner) runWebFetch(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
-	return nil, fmt.Errorf("todo")
-}
-func (r *LocalToolRunner) runWebExtract(ctx context.Context, args json.RawMessage) (json.RawMessage, error) {
-	return nil, fmt.Errorf("todo")
-}
