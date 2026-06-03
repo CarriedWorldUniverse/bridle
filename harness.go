@@ -21,6 +21,7 @@ const (
 	ProviderBedrock    ProviderID = "bedrock"
 	ProviderGemini     ProviderID = "gemini-api"
 	ProviderGeminiCLI  ProviderID = "gemini-cli"
+	ProviderCodexCLI   ProviderID = "codex-cli"
 )
 
 // StopReason explains why a turn ended.
@@ -105,18 +106,18 @@ type InboxItem struct {
 // TurnRequest is the complete input for one deliberation turn.
 type TurnRequest struct {
 	// Identity & framing
-	AspectID     string         // who's running (cost/triage/identity attribution)
+	AspectID           string         // who's running (cost/triage/identity attribution)
 	AppendSystemPrompt string         // composed by funnel: NEXUS.md + SOUL.md + PRIMER + harness rules
-	Session      SessionHandle  // opaque handle for provider-side state (subprocess-stream: resume key)
-	SessionTail  []SessionEvent // recent events for direct-api providers to lower into the request
+	Session            SessionHandle  // opaque handle for provider-side state (subprocess-stream: resume key)
+	SessionTail        []SessionEvent // recent events for direct-api providers to lower into the request
 
 	// This turn
 	UserMessage string      // the prompt that opens this turn (may be empty for autonomous)
 	Inbox       []InboxItem // mid-turn comms accumulated since last turn
 
 	// Tool surface
-	Tools []ToolDef         // explicit in-process tool defs
-	MCP   *MCPClientConfig  // MCP-loaded tools; nil = no MCP tools this turn
+	Tools []ToolDef        // explicit in-process tool defs
+	MCP   *MCPClientConfig // MCP-loaded tools; nil = no MCP tools this turn
 
 	// Provider
 	Provider ProviderID // claude-api | ollama-local | openai-api | claude-code
