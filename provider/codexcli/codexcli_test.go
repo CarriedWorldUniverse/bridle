@@ -30,8 +30,8 @@ func TestCapabilities(t *testing.T) {
 	if !caps.SupportsAfterToolCall {
 		t.Error("SupportsAfterToolCall should be true")
 	}
-	if caps.SupportsMCP {
-		t.Error("SupportsMCP should be false")
+	if !caps.SupportsMCP {
+		t.Error("SupportsMCP should be true (MCP wired via --config mcp_servers.*)")
 	}
 }
 
