@@ -20,6 +20,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -75,7 +76,7 @@ func (p *Provider) Capabilities() bridle.ProviderCapabilities {
 		SupportsCustomTools:    false,
 		SupportsBeforeToolCall: false,
 		SupportsAfterToolCall:  true,
-		SupportsMCP:            false,
+		SupportsMCP:            true,
 	}
 }
 
@@ -193,6 +194,14 @@ func (p *Provider) buildCLIArgs(req bridle.ProviderRequest) []string {
 	for _, cfg := range p.ExtraConfig {
 		args = append(args, "--config", cfg)
 	}
+	// Wire bridle's MCP servers into codex as per-invocation --config
+	// overrides (mcp_servers.<name>.*). codex exec connects to these and
+	// exposes their tools to the model as mcp__<name>.<tool> — the path by
+	// which a codex aspect gets the funnel-supplied nexus tools (comms,
+	// jira, ledger, auth, …), even though those execute over the broker WS.
+	if req.MCP != nil {
+		args = append(args, mcpConfigArgs(req.MCP.Servers)...)
+	}
 	if req.Cwd != "" {
 		args = append(args, "--cd", req.Cwd)
 	}
@@ -225,6 +234,102 @@ func (p *Provider) buildCLIArgs(req bridle.ProviderRequest) []string {
 		args = append(args, prompt)
 	}
 	return args
+}
+
+// mcpConfigArgs translates bridle MCP server specs into codex
+// `--config mcp_servers.<name>.*` arguments. Each value is TOML-encoded
+// (codex parses the value portion of --config as TOML). stdio servers map
+// to command/args/env; http_sse servers map to url.
+func mcpConfigArgs(servers []bridle.MCPServerSpec) []string {
+	var out []string
+	add := func(key, tomlVal string) {
+		out = append(out, "--config", key+"="+tomlVal)
+	}
+	for _, s := range servers {
+		if s.Name == "" {
+			continue
+		}
+		base := "mcp_servers." + tomlBareKey(s.Name)
+		if s.Transport == bridle.MCPTransportHTTPSSE {
+			if s.URL == "" {
+				continue
+			}
+			add(base+".url", tomlString(s.URL))
+			continue
+		}
+		// stdio (default)
+		if len(s.Command) == 0 {
+			continue
+		}
+		add(base+".command", tomlString(s.Command[0]))
+		if len(s.Command) > 1 {
+			add(base+".args", tomlStringArray(s.Command[1:]))
+		}
+		if len(s.Env) > 0 {
+			add(base+".env", tomlStringTable(s.Env))
+		}
+	}
+	return out
+}
+
+// tomlString returns a TOML basic-string literal for s.
+func tomlString(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		switch r {
+		case '"':
+			b.WriteString(`\"`)
+		case '\\':
+			b.WriteString(`\\`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+func tomlStringArray(ss []string) string {
+	parts := make([]string, len(ss))
+	for i, s := range ss {
+		parts[i] = tomlString(s)
+	}
+	return "[" + strings.Join(parts, ",") + "]"
+}
+
+func tomlStringTable(m map[string]string) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys) // deterministic args (tests + prefix-cache stability)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, tomlBareKey(k)+"="+tomlString(m[k]))
+	}
+	return "{" + strings.Join(parts, ",") + "}"
+}
+
+// tomlBareKey returns k as a TOML key — bare when it matches the bare-key
+// grammar (A-Za-z0-9_-), otherwise a quoted string. Server + env-var names
+// are normally bare-safe.
+func tomlBareKey(k string) string {
+	if k == "" {
+		return `""`
+	}
+	for _, r := range k {
+		if !(r == '-' || r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			return tomlString(k)
+		}
+	}
+	return k
 }
 
 func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, error) {
