@@ -62,8 +62,15 @@ type Provider struct {
 // New returns a codexcli Provider with headless-safe defaults.
 func New() *Provider {
 	return &Provider{
-		CodexPath:        "codex",
-		ApprovalPolicy:   "never",
+		CodexPath:      "codex",
+		ApprovalPolicy: "never",
+		// A codex aspect runs inside a trust boundary the funnel controls
+		// (a trusted host or a k8s pod), so codex's own internal sandbox is
+		// redundant — and its default (workspace-write) blocks network,
+		// which broke aspect git push (NEX-433 follow-up). The surrounding
+		// environment is the real sandbox; disable codex's. Override the
+		// field for stricter environments.
+		Sandbox:          "danger-full-access",
 		SkipGitRepoCheck: true,
 	}
 }

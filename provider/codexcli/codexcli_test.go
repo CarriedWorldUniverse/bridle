@@ -35,6 +35,24 @@ func TestCapabilities(t *testing.T) {
 	}
 }
 
+func TestNewDefaults(t *testing.T) {
+	p := New()
+	// Codex aspects run inside the funnel's trust boundary, so codex's
+	// internal sandbox is disabled by default (its workspace-write default
+	// blocks network / git push).
+	if p.Sandbox != "danger-full-access" {
+		t.Errorf("Sandbox = %q, want danger-full-access", p.Sandbox)
+	}
+	if p.ApprovalPolicy != "never" {
+		t.Errorf("ApprovalPolicy = %q, want never", p.ApprovalPolicy)
+	}
+	// And it surfaces in the built args.
+	args := strings.Join(p.buildCLIArgs(bridle.ProviderRequest{}), "\x00")
+	if !strings.Contains(args, "--sandbox\x00danger-full-access") {
+		t.Errorf("args missing --sandbox danger-full-access: %q", args)
+	}
+}
+
 func TestBuildCLIArgs_NewAndResume(t *testing.T) {
 	p := New()
 	p.Sandbox = "read-only"
