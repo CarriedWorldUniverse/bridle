@@ -64,6 +64,13 @@ func TestProvider_LiveTurn_RealClaude(t *testing.T) {
 		t.Fatalf("turn returned empty FinalText (sink: %q)", sink.b.String())
 	}
 	if !strings.Contains(strings.ToUpper(res.FinalText), "PONG") {
-		t.Logf("note: reply did not contain PONG, but a turn completed cleanly: %q", res.FinalText)
+		t.Errorf("FinalText missing PONG: %q", res.FinalText)
+	}
+	// FinalText is sourced from claude's JSONL transcript, so it must be the
+	// clean answer — none of the TUI chrome or effect tags the raw stream has.
+	for _, chrome := range []string{"Pondering", "esc to interrupt", "[cleared]", "tokens)", "running st", "▪", "✶"} {
+		if strings.Contains(res.FinalText, chrome) {
+			t.Errorf("FinalText leaked TUI chrome %q: %q", chrome, res.FinalText)
+		}
 	}
 }
