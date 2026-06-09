@@ -109,6 +109,63 @@ func TestCapturePlainText_Empty(t *testing.T) {
 	}
 }
 
+func TestCapturePlainText_StripsLeadingStaleConversationWarning(t *testing.T) {
+	const out = "Warning: conversation \"stale-session\" not found.\nactual reply\n"
+
+	sink := &fake.SliceEventSink{}
+	result, err := capturePlainText(strings.NewReader(out), sink)
+	if err != nil {
+		t.Fatalf("capturePlainText error: %v", err)
+	}
+	if result.FinalText != "actual reply" {
+		t.Fatalf("FinalText = %q, want %q", result.FinalText, "actual reply")
+	}
+	if strings.Contains(result.FinalText, "Warning: conversation") {
+		t.Fatalf("FinalText leaked stale conversation warning: %q", result.FinalText)
+	}
+	if len(result.SessionDelta) != 0 {
+		t.Fatalf("SessionDelta len = %d, want 0 for stale conversation", len(result.SessionDelta))
+	}
+	if len(sink.Events) == 0 {
+		t.Fatal("expected clean assistant text event")
+	}
+}
+
+func TestCapturePlainText_PureStaleConversationWarningYieldsEmpty(t *testing.T) {
+	const out = "Warning: conversation \"stale-session\" not found."
+
+	sink := &fake.SliceEventSink{}
+	result, err := capturePlainText(strings.NewReader(out), sink)
+	if err != nil {
+		t.Fatalf("capturePlainText error: %v", err)
+	}
+	if result.FinalText != "" {
+		t.Fatalf("FinalText = %q, want empty", result.FinalText)
+	}
+	if len(result.SessionDelta) != 0 {
+		t.Fatalf("SessionDelta len = %d, want 0", len(result.SessionDelta))
+	}
+	if len(sink.Events) != 0 {
+		t.Fatalf("events len = %d, want 0", len(sink.Events))
+	}
+}
+
+func TestCapturePlainText_NormalOutputUntouched(t *testing.T) {
+	const out = "normal output\n"
+
+	sink := &fake.SliceEventSink{}
+	result, err := capturePlainText(strings.NewReader(out), sink)
+	if err != nil {
+		t.Fatalf("capturePlainText error: %v", err)
+	}
+	if result.FinalText != "normal output" {
+		t.Fatalf("FinalText = %q, want %q", result.FinalText, "normal output")
+	}
+	if len(result.SessionDelta) != 1 {
+		t.Fatalf("SessionDelta len = %d, want 1", len(result.SessionDelta))
+	}
+}
+
 func TestRoundTripLive(t *testing.T) {
 	if os.Getenv("BRIDLE_LIVE_ANTIGRAVITY") != "1" {
 		t.Skip("set BRIDLE_LIVE_ANTIGRAVITY=1 to run live Antigravity CLI test")

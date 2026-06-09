@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -28,6 +29,8 @@ import (
 )
 
 const providerID = bridle.ProviderAntigravityCLI
+
+var staleConversationWarningRE = regexp.MustCompile(`^Warning: conversation "[^"]+" not found\.$`)
 
 // Provider implements bridle.Provider by shelling out to the Antigravity CLI (agy).
 type Provider struct {
@@ -140,8 +143,12 @@ func capturePlainText(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult
 		finalText    string
 		sessionDelta []bridle.SessionEvent
 	)
-	if text := strings.TrimSpace(string(raw)); text != "" {
+	text, staleConversation := stripLeadingStaleConversationWarnings(string(raw))
+	if text := strings.TrimSpace(text); text != "" {
 		bridle.EmitAssistantText(sink, &finalText, &sessionDelta, providerID, text)
+	}
+	if staleConversation {
+		sessionDelta = nil
 	}
 
 	return bridle.ProviderResult{
@@ -149,6 +156,21 @@ func capturePlainText(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult
 		StopReason:   bridle.StopReasonModelDone,
 		SessionDelta: sessionDelta,
 	}, nil
+}
+
+func stripLeadingStaleConversationWarnings(text string) (string, bool) {
+	lines := strings.SplitAfter(text, "\n")
+	removed := false
+	i := 0
+	for i < len(lines) {
+		line := strings.TrimRight(lines[i], "\r\n")
+		if !staleConversationWarningRE.MatchString(line) {
+			break
+		}
+		removed = true
+		i++
+	}
+	return strings.Join(lines[i:], ""), removed
 }
 
 // buildPrompt assembles the messages into a single prompt string for the CLI.
