@@ -22,6 +22,7 @@ const (
 	ProviderGemini     ProviderID = "gemini-api"
 	ProviderGeminiCLI  ProviderID = "gemini-cli"
 	ProviderCodexCLI   ProviderID = "codex-cli"
+	ProviderAntigravityCLI ProviderID = "antigravity-cli"
 )
 
 // StopReason explains why a turn ended.
@@ -120,7 +121,7 @@ type TurnRequest struct {
 	MCP   *MCPClientConfig // MCP-loaded tools; nil = no MCP tools this turn
 
 	// Provider
-	Provider ProviderID // claude-api | ollama-local | openai-api | claude-code
+	Provider ProviderID // claude-api | openai-api | bedrock | gemini-api | ollama-local | claude-code | gemini-cli | codex-cli | claude-pty
 	Model    string     // REQUIRED — provider-specific model id; RunTurn returns ErrModelRequired if empty
 	MaxSteps int        // hard cap on tool-call rounds; 0 = unlimited
 
@@ -167,24 +168,25 @@ type TurnRequest struct {
 	// system prompt. Nil = free-form text (provider default).
 	ResponseFormat *ResponseFormat
 
-	// Cwd is the working directory for subprocess-style providers
-	// (currently claude-code). Empty falls through to the bridle host
-	// process's cwd. Per-request rather than per-Harness because
-	// different aspects sharing one Harness need distinct cwds —
-	// claude-code derives its session jsonl path AND its .mcp.json
-	// discovery from cwd, so two aspects with the same Harness but
-	// overlapping cwds collide sessions and leak MCP identity from one
-	// into the other. Direct-API providers (claude-api, ollama, openai)
-	// ignore this field — they have no subprocess to anchor.
+	// Cwd is the working directory for subprocess-style providers.
+	// Empty falls through to the bridle host process's cwd. Per-request
+	// rather than per-Harness because different aspects sharing one
+	// Harness need distinct cwds. For example, claude-code derives its
+	// session jsonl path AND its .mcp.json discovery from cwd, so two
+	// aspects with the same Harness but overlapping cwds collide
+	// sessions and leak MCP identity from one into the other. Codex CLI
+	// receives the same value as both process cwd and `codex --cd`.
+	// Direct-API providers ignore this field — they have no subprocess
+	// to anchor.
 	Cwd string
 
 	// ProviderEnv is per-call environment for the provider. Direct-API
 	// providers read it as their auth/routing config (commonly
 	// ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, OPENAI_API_KEY,
-	// OPENAI_BASE_URL); subprocess providers (claude-code) propagate it
-	// into the spawned process's env so the same per-turn override
-	// pattern applies. nil/empty = use whatever the provider already
-	// has on its own (process env, --bare-style flags, etc).
+	// OPENAI_BASE_URL); subprocess providers propagate it into the
+	// spawned process's env so the same per-turn override pattern
+	// applies. nil/empty = use whatever the provider already has on its
+	// own (process env, --bare-style flags, etc).
 	//
 	// Per-call rather than per-process so a single funnel can mix
 	// credentials across turns — e.g. main turn against the operator's

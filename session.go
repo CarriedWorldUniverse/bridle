@@ -76,7 +76,7 @@ func ParseSessionEvent(e SessionEvent) (NormalizedSessionEvent, error) {
 		if err := json.Unmarshal(e.RawJSON, &tu); err == nil && tu.Name != "" {
 			return NormalizedSessionEvent{Role: e.Role, Content: fmt.Sprintf("tool_use: %s %s", tu.Name, tu.Input)}, nil
 		}
-	case ProviderGeminiCLI:
+	case ProviderGeminiCLI, ProviderAntigravityCLI:
 		var ev struct {
 			Type       string          `json:"type"`
 			ToolName   string          `json:"tool_name"`

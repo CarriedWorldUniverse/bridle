@@ -28,11 +28,12 @@ import (
 	"github.com/CarriedWorldUniverse/bridle/internal/version"
 	claudeapi "github.com/CarriedWorldUniverse/bridle/provider/claude"
 	"github.com/CarriedWorldUniverse/bridle/provider/claudecode"
+	"github.com/CarriedWorldUniverse/bridle/provider/antigravitycli"
 	"github.com/CarriedWorldUniverse/bridle/provider/ollama"
 )
 
 func main() {
-	providerFlag := flag.String("provider", "claude", "provider: claude | claudeapi | ollama")
+	providerFlag := flag.String("provider", "claude", "provider: claude | claudeapi | ollama | antigravity")
 	modelFlag := flag.String("model", "", "model id (default per-provider)")
 	promptFlag := flag.String("prompt", "What time is it? Use the now tool.", "user prompt for the deliberation turn")
 	maxStepsFlag := flag.Int("max-steps", 5, "max tool-call rounds per turn")
@@ -70,8 +71,14 @@ func main() {
 		if model == "" {
 			model = "llama3.2:3b"
 		}
+	case "antigravity":
+		p := antigravitycli.New()
+		if model == "" {
+			model = "gemini-2.0-flash"
+		}
+		provider = p
 	default:
-		fmt.Fprintf(os.Stderr, "unknown provider %q (want: claude | claudeapi | ollama)\n", *providerFlag)
+		fmt.Fprintf(os.Stderr, "unknown provider %q (want: claude | claudeapi | ollama | antigravity)\n", *providerFlag)
 		os.Exit(1)
 	}
 
