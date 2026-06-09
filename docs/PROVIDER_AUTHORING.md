@@ -52,7 +52,7 @@ type ProviderCapabilities struct {
 ```
 
 - **`CategoryDirectAPI`** — provider talks to the model over HTTP/RPC, can intermediate every tool call. Set `SupportsCustomTools: true` and both hook flags to true.
-- **`CategorySubprocessStream`** — provider shells out to a CLI that owns its own agent loop (`claude -p`, `gemini -p`). Bridle observes the stream but doesn't intercept. Set `SupportsCustomTools: false`, `SupportsBeforeToolCall: false`, `SupportsAfterToolCall: true` (we observe completed tool calls from the stream).
+- **`CategorySubprocessStream`** — provider shells out to a CLI that owns its own agent loop (`claude -p`, `gemini -p`, `codex exec --json`). Bridle observes the stream but doesn't intercept. Set `SupportsCustomTools: false`, `SupportsBeforeToolCall: false`, `SupportsAfterToolCall: true` (we observe completed tool calls from the stream).
 
 The harness reads capabilities once per Provider value and routes accordingly. Lying here will produce subtle failures — if you say you support custom tools and don't, the model never gets the tool list.
 
@@ -69,7 +69,7 @@ This is where the work happens. The contract:
 
 ## The cancellation pattern (subprocess providers)
 
-This is the pattern used by `claudecode` and `geminicli`. It's been wrong twice in this repo — copy it carefully.
+This is the pattern used by `claudecode`, `geminicli`, and `codexcli`. It's been wrong twice in this repo — copy it carefully.
 
 ```go
 cmd := exec.Command(...)
@@ -183,13 +183,25 @@ if len(req.Tools) > 0 {
 
 A non-empty `req.Tools` with all-empty `Name` fields would otherwise translate to `allowed=[]` and silently drop the allowlist flag entirely — the CLI then runs with the full default allowlist. That's a footgun (silent privilege escalation), so on degenerate input we fall back to the static `p.AllowedTools` rather than the "no flag at all" path.
 
+Some subprocess providers do not consume bridle tool definitions at all.
+`codexcli` is the current example: Codex owns its native command/tool surface,
+and bridle only maps observed `command_execution` items to
+`ToolCallStart`/`ToolCallResult` for audit and UI. Do not pretend such a
+provider supports custom tools just because the CLI can execute commands.
+
 ---
 
 ## Session continuity
 
 Providers that support session resume read `req.Session.ID`. New sessions: provider mints (or accepts) the ID and creates the session backing file/state. Existing sessions: provider points the model at the prior state.
 
-`claudecode` example: `--session-id <uuid>` for new (CLI creates the jsonl), `--resume <uuid>` for existing. The provider stats `~/.claude/projects/*/<id>.jsonl` to decide which flag to use, since the funnel pre-mints UUIDs and doesn't know whether a session file exists yet.
+`claudecode` example: `--session-id <uuid>` for new (CLI creates the jsonl), `--resume <uuid>` for existing. The provider retries a new-session collision with `--resume <uuid>` so interrupted first turns do not brick the thread.
+
+`codexcli` example: new turns use `codex exec --json <prompt>` and record the
+emitted `thread_id` in `SessionDelta`. Existing turns use
+`codex exec resume <thread-id> --json <prompt>`. Codex can also be run with
+`Model: "default"` in the bridle request, which omits `--model` and lets the
+CLI's configured model decide.
 
 If your provider has its own session shape, follow the same principle: don't trust the funnel to know whether the session is "new" or "existing"; check yourself.
 
@@ -208,10 +220,15 @@ If you add RawJSON, also add a case for your provider in `session.go`'s parse fu
 The repo's existing test surface:
 
 - `claudecode_test.go` does a real CLI smoke (slow, requires `claude` on PATH).
+- `provider/codexcli` has parser/argument tests and an opt-in live smoke gated by `BRIDLE_LIVE_CODEX=1`.
 - `internal/mcpclient` has unit tests.
 - `harness_test.go` exercises the provider-agnostic harness with a fake provider.
 
-The convention so far is one provider-level test per stream-style provider; direct-API providers don't need them because the genai/anthropic/openai SDKs are well-tested upstream. Add a test only when there's provider-specific glue worth pinning (cancellation behavior, stream parsing, allowlist translation).
+The convention is deterministic parser/argument tests for stream-style
+providers, with live provider smoke tests gated by environment variables when
+they require local auth. Direct-API providers don't need broad SDK retesting,
+but provider-specific glue still needs coverage: cancellation behavior, stream
+parsing, allowlist translation, error classification, and session resume.
 
 ---
 
