@@ -2,7 +2,6 @@ package antigravitycli
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"os/exec"
 	"strings"
@@ -27,8 +26,9 @@ func TestCapabilities(t *testing.T) {
 	if caps.SupportsBeforeToolCall {
 		t.Error("SupportsBeforeToolCall should be false")
 	}
-	if !caps.SupportsAfterToolCall {
-		t.Error("SupportsAfterToolCall should be true")
+	// agy has no structured-output mode, so no per-tool-call events are emitted.
+	if caps.SupportsAfterToolCall {
+		t.Error("SupportsAfterToolCall should be false (agy streams no tool events)")
 	}
 	if caps.SupportsMCP {
 		t.Error("SupportsMCP should be false")
@@ -50,7 +50,6 @@ func TestBuildCLIArgs_NewAndResume(t *testing.T) {
 	args := strings.Join(p.buildCLIArgs(req), "\x00")
 	for _, want := range []string{
 		"-p\x00hello",
-		"--output-format\x00stream-json",
 		"--dangerously-skip-permissions",
 		"--model\x00gemini-2.0-flash",
 		"--add-dir\x00/mywork",
@@ -58,6 +57,12 @@ func TestBuildCLIArgs_NewAndResume(t *testing.T) {
 	} {
 		if !strings.Contains(args, want) {
 			t.Fatalf("args missing %q in %q", want, args)
+		}
+	}
+	// agy rejects these — they must NOT be passed (the bug the local test caught).
+	for _, forbidden := range []string{"--output-format", "--allowed-tools"} {
+		if strings.Contains(args, forbidden) {
+			t.Fatalf("args must not contain %q (agy has no such flag): %q", forbidden, args)
 		}
 	}
 
@@ -68,76 +73,39 @@ func TestBuildCLIArgs_NewAndResume(t *testing.T) {
 	}
 }
 
-func TestParseStream_TextOnly(t *testing.T) {
-	input := strings.Join([]string{
-		`{"type":"init","session_id":"sess-1","model":"model-1"}`,
-		`{"type":"message","role":"assistant","content":"hello"}`,
-		`{"type":"result","status":"success","stats":{"input_tokens":10,"output_tokens":5}}`,
-	}, "\n")
+func TestCapturePlainText(t *testing.T) {
+	const out = "pipeline check ok\n"
 
 	sink := &fake.SliceEventSink{}
-	result, err := parseStream(strings.NewReader(input), sink)
+	result, err := capturePlainText(strings.NewReader(out), sink)
 	if err != nil {
-		t.Fatalf("parseStream error: %v", err)
+		t.Fatalf("capturePlainText error: %v", err)
 	}
-	if result.FinalText != "hello" {
-		t.Fatalf("FinalText = %q, want hello", result.FinalText)
+	if result.FinalText != "pipeline check ok" {
+		t.Fatalf("FinalText = %q, want %q", result.FinalText, "pipeline check ok")
 	}
 	if result.StopReason != bridle.StopReasonModelDone {
 		t.Fatalf("StopReason = %q, want model_done", result.StopReason)
 	}
-	if result.Usage.InputTokens != 10 || result.Usage.OutputTokens != 5 {
-		t.Fatalf("Usage = %+v", result.Usage)
+	if len(result.SessionDelta) != 1 {
+		t.Fatalf("SessionDelta len = %d, want 1", len(result.SessionDelta))
 	}
-	if len(result.SessionDelta) != 2 {
-		t.Fatalf("SessionDelta len = %d, want 2", len(result.SessionDelta))
+	if len(sink.Events) == 0 {
+		t.Fatal("expected at least one emitted event (assistant text)")
 	}
 }
 
-func TestParseStream_ToolCall(t *testing.T) {
-	input := strings.Join([]string{
-		`{"type":"init","session_id":"sess-1","model":"model-1"}`,
-		`{"type":"tool_use","tool_name":"get_weather","tool_id":"call-1","parameters":{"location":"Seattle"}}`,
-		`{"type":"tool_result","tool_id":"call-1","status":"success","result":{"temp":65}}`,
-		`{"type":"result","status":"success","stats":{"input_tokens":15,"output_tokens":20}}`,
-	}, "\n")
-
+func TestCapturePlainText_Empty(t *testing.T) {
 	sink := &fake.SliceEventSink{}
-	result, err := parseStream(strings.NewReader(input), sink)
+	result, err := capturePlainText(strings.NewReader("   \n"), sink)
 	if err != nil {
-		t.Fatalf("parseStream error: %v", err)
+		t.Fatalf("capturePlainText error: %v", err)
 	}
-	if result.StepCount != 1 {
-		t.Fatalf("StepCount = %d, want 1", result.StepCount)
+	if result.FinalText != "" {
+		t.Fatalf("FinalText = %q, want empty", result.FinalText)
 	}
-	if len(result.ToolCalls) != 1 {
-		t.Fatalf("ToolCalls len = %d, want 1", len(result.ToolCalls))
-	}
-	call := result.ToolCalls[0]
-	if call.ID != "call-1" || call.Name != "get_weather" {
-		t.Fatalf("ToolCall = %+v", call)
-	}
-	var args map[string]string
-	if err := json.Unmarshal(call.Args, &args); err != nil {
-		t.Fatalf("call args unmarshal: %v", err)
-	}
-	if args["location"] != "Seattle" {
-		t.Fatalf("location arg = %q", args["location"])
-	}
-
-	var sawStart, sawResult, sawBoundary bool
-	for _, ev := range sink.Events {
-		switch ev.(type) {
-		case bridle.ToolCallStart:
-			sawStart = true
-		case bridle.ToolCallResult:
-			sawResult = true
-		case bridle.StepBoundary:
-			sawBoundary = true
-		}
-	}
-	if !sawStart || !sawResult || !sawBoundary {
-		t.Fatalf("events start=%v result=%v boundary=%v", sawStart, sawResult, sawBoundary)
+	if result.StopReason != bridle.StopReasonModelDone {
+		t.Fatalf("StopReason = %q, want model_done", result.StopReason)
 	}
 }
 
@@ -145,8 +113,8 @@ func TestRoundTripLive(t *testing.T) {
 	if os.Getenv("BRIDLE_LIVE_ANTIGRAVITY") != "1" {
 		t.Skip("set BRIDLE_LIVE_ANTIGRAVITY=1 to run live Antigravity CLI test")
 	}
-	if _, err := exec.LookPath("antigravity"); err != nil {
-		t.Skip("antigravity CLI not on PATH")
+	if _, err := exec.LookPath("agy"); err != nil {
+		t.Skip("agy CLI not on PATH")
 	}
 
 	p := New()
