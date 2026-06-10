@@ -7,7 +7,39 @@ import (
 	"sort"
 	"testing"
 	"time"
+
+	bridle "github.com/CarriedWorldUniverse/bridle"
 )
+
+func TestLastUserPrompt(t *testing.T) {
+	cases := []struct {
+		name string
+		msgs []bridle.ProviderMessage
+		want string
+	}{
+		{"nil messages", nil, ""},
+		{"no user messages", []bridle.ProviderMessage{
+			{Role: "system", Content: "sys"},
+			{Role: "assistant", Content: "hi"},
+		}, ""},
+		{"single user", []bridle.ProviderMessage{
+			{Role: "user", Content: "hello"},
+		}, "hello"},
+		{"most recent user wins", []bridle.ProviderMessage{
+			{Role: "user", Content: "first"},
+			{Role: "assistant", Content: "reply"},
+			{Role: "user", Content: "second"},
+			{Role: "assistant", Content: "trailing"},
+		}, "second"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := LastUserPrompt(tc.msgs); got != tc.want {
+				t.Errorf("LastUserPrompt = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
 
 func TestMergeEnv(t *testing.T) {
 	base := []string{"PATH=/usr/bin", "HOME=/home/x", "FOO=old"}

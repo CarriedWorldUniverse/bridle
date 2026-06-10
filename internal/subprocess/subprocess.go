@@ -13,7 +13,32 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	bridle "github.com/CarriedWorldUniverse/bridle"
 )
+
+// LastUserPrompt returns the most recent user message — NOT the full
+// SessionTail — for use as a CLI prompt argument.
+//
+// Subprocess-stream CLIs get prior conversation history from their own
+// session store on resume, not from argv. Folding SessionTail into the
+// prompt would (a) duplicate the history the subprocess is already
+// loading from disk and (b) blow Windows CreateProcess's 32K argv
+// budget once a session accumulates state. Observed 2026-05-13: keel
+// as Frame (global context) crossed 32K after a few turns and every
+// spawn failed with the misleading "filename or extension is too long"
+// kernel error. See task #216 for full diagnosis.
+//
+// Direct-API providers need history reassembled because they have no
+// subprocess-owned session store — they must not use this function.
+func LastUserPrompt(msgs []bridle.ProviderMessage) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "user" {
+			return msgs[i].Content
+		}
+	}
+	return ""
+}
 
 // graceWindow is how long WatchCancel waits after the graceful
 // termination signal before escalating to SIGKILL.

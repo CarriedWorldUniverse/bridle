@@ -227,7 +227,7 @@ func (p *Provider) buildCLIArgs(req bridle.ProviderRequest) []string {
 	}
 	args = append(args, p.ExtraArgs...)
 
-	prompt := buildPrompt(req)
+	prompt := subprocess.LastUserPrompt(req.Messages)
 	if prompt != "" {
 		args = append(args, prompt)
 	}
@@ -491,15 +491,6 @@ type codexItem struct {
 	AggregatedOutput string `json:"aggregated_output"`
 	ExitCode         *int   `json:"exit_code"`
 	Status           string `json:"status"`
-}
-
-func buildPrompt(req bridle.ProviderRequest) string {
-	for i := len(req.Messages) - 1; i >= 0; i-- {
-		if req.Messages[i].Role == "user" {
-			return req.Messages[i].Content
-		}
-	}
-	return ""
 }
 
 func classifyProviderError(stderr string, waitErr error) *bridle.ProviderError {

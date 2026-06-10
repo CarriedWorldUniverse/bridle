@@ -571,7 +571,7 @@ func parseStream(r io.Reader, sink bridle.EventSink) (parseResult, error) {
 // Extracted from runTurnOnce so the allowed-tools / MCP interaction is
 // testable without spawning a subprocess.
 func (p *Provider) buildCLIArgs(req bridle.ProviderRequest, sessionIsNew bool) (args []string, systemPromptFile string, err error) {
-	prompt := buildPrompt(req)
+	prompt := subprocess.LastUserPrompt(req.Messages)
 	args = []string{"-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions"}
 
 	if req.AppendSystemPrompt != "" {
@@ -674,32 +674,6 @@ func appendSystemPromptArgs(body string) ([]string, string, error) {
 		return nil, "", fmt.Errorf("claudecode: close system prompt tempfile: %w", err)
 	}
 	return []string{"--append-system-prompt-file", f.Name()}, f.Name(), nil
-}
-
-// buildPrompt returns the current turn's user message for the CLI's -p arg.
-//
-// Returns ONLY the most recent user message — not the full SessionTail. The
-// claude-code subprocess gets prior conversation history from the session
-// jsonl on --resume <id>, not from argv. Folding SessionTail into -p here
-// would (a) duplicate the history the subprocess is already loading from
-// disk and (b) blow Windows CreateProcess's 32K argv budget once a session
-// accumulates state. Observed 2026-05-13: keel as Frame (global context)
-// crossed 32K after a few turns and every spawn failed with the misleading
-// "filename or extension is too long" kernel error.
-//
-// Direct-API providers (claude-api etc.) need history reassembled because
-// they have no subprocess-owned jsonl — they use toClaudeMessages() in
-// their own provider package, not this function. buildPrompt is
-// claudecode-exclusive by design.
-//
-// See task #216 for full diagnosis.
-func buildPrompt(req bridle.ProviderRequest) string {
-	for i := len(req.Messages) - 1; i >= 0; i-- {
-		if req.Messages[i].Role == "user" {
-			return req.Messages[i].Content
-		}
-	}
-	return ""
 }
 
 // isAPIError reports whether an event carries a CLI-level API error marker.
