@@ -470,15 +470,29 @@ func TestRunTurn_TimingPromptBytesMarshalError(t *testing.T) {
 func TestRunTurn_TimingDefaultClock(t *testing.T) {
 	h := NewHarness(&timingProvider{steps: []timingStep{{text: "hello"}}})
 
+	sink := &sliceSink{}
 	res, err := h.RunTurn(context.Background(), TurnRequest{
 		Model:       "fake-model",
 		UserMessage: "hi",
-	}, nil, &sliceSink{})
+	}, nil, sink)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if res.Timing.TotalSecs <= 0 {
-		t.Errorf("TotalSecs = %v; want > 0 with the default clock", res.Timing.TotalSecs)
+	// Windows' timer granularity (~15.6ms) makes a fake-provider turn
+	// measure 0 elapsed, so TotalSecs > 0 cannot be asserted portably.
+	// The default-clock signal is a real wall-clock TS on the TurnDone
+	// event instead; TotalSecs just must not go negative.
+	if res.Timing.TotalSecs < 0 {
+		t.Errorf("TotalSecs = %v; want >= 0 with the default clock", res.Timing.TotalSecs)
+	}
+	var doneTS time.Time
+	for _, ev := range sink.events {
+		if td, ok := ev.(TurnDone); ok {
+			doneTS = td.TS
+		}
+	}
+	if doneTS.IsZero() {
+		t.Error("TurnDone.TS is zero; default clock did not stamp events")
 	}
 	if len(res.Timing.Rounds) != 1 {
 		t.Errorf("Rounds len = %d; want 1", len(res.Timing.Rounds))
