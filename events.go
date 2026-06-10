@@ -3,6 +3,7 @@ package bridle
 import (
 	"encoding/json"
 	"errors"
+	"time"
 )
 
 // Event is the union type for all observable harness events.
@@ -13,6 +14,7 @@ type Event interface {
 // ModelChunk carries a streamed text fragment from the model.
 type ModelChunk struct {
 	Text string
+	TS   time.Time // stamped by the harness at emission; zero outside a harness turn
 }
 
 // ToolCallStart fires when the model requests a tool call, before execution.
@@ -20,24 +22,28 @@ type ToolCallStart struct {
 	ID   string
 	Name string
 	Args json.RawMessage
+	TS   time.Time // stamped by the harness at emission; zero outside a harness turn
 }
 
 // ToolCallResult fires after the tool runner returns (or errors).
 type ToolCallResult struct {
 	ID     string
 	Result json.RawMessage
-	Err    string // non-empty if the tool runner returned an error
+	Err    string    // non-empty if the tool runner returned an error
+	TS     time.Time // stamped by the harness at emission; zero outside a harness turn
 }
 
 // StepBoundary fires between tool-call rounds.
 // Step 1 = the first round; fires after its results are sent back to the model.
 type StepBoundary struct {
 	Step int
+	TS   time.Time // stamped by the harness at emission; zero outside a harness turn
 }
 
 // TurnDone fires after the turn completes successfully.
 type TurnDone struct {
 	Result TurnResult
+	TS     time.Time // stamped by the harness at emission; zero outside a harness turn
 }
 
 // TurnError fires when the provider or harness hits a non-recoverable
@@ -50,6 +56,7 @@ type TurnDone struct {
 type TurnError struct {
 	Err   error
 	Stage TurnErrorStage
+	TS    time.Time // stamped by the harness at emission; zero outside a harness turn
 }
 
 // TurnErrorStage names a pipeline location that produced a TurnError.

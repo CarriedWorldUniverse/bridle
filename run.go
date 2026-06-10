@@ -10,6 +10,19 @@ import (
 
 // runTurn is the inner implementation, called by RunTurn after the panic trap.
 func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunner, sink EventSink) (TurnResult, error) {
+	now := h.clock()
+	turnStart := now()
+	var timing TurnTiming
+
+	// Wrap the caller's sink ONCE: every event the harness or the
+	// provider emits from here on is timestamp-stamped, and the
+	// decorator records each round's first-event time for the
+	// startup/stream split. Providers receive the wrapped sink, so
+	// provider-emitted events get stamped for free — zero provider
+	// changes.
+	ssink := &stampSink{inner: sink, now: now}
+	sink = ssink
+
 	// Connect MCP servers and merge tool surface (direct-api providers only).
 	var mcpClient *mcpclient.Client
 	caps := h.provider.Capabilities()
@@ -30,6 +43,9 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 		req.Tools = merged
 	}
 
+	// Assembly span, round 0: lowerRequest + BeforeModelCall hooks.
+	assemblyStart := now()
+
 	// Lower TurnRequest → ProviderRequest.
 	preq := lowerRequest(req)
 
@@ -46,6 +62,7 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 	if aborted {
 		return partialAbort(), nil
 	}
+	assemblySecs := now().Sub(assemblyStart).Seconds()
 
 	var (
 		allInvocations []ToolInvocation
@@ -62,9 +79,34 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 			return partialAbortWith(finalText, allInvocations, stepCount, totalUsage), nil
 		}
 
+		// One RoundTiming entry per provider call. Request-size fields
+		// reflect the request as the provider receives it (post-hook).
+		timing.Rounds = append(timing.Rounds, RoundTiming{
+			AssemblySecs: assemblySecs,
+			PromptBytes:  promptBytes(preq.Messages),
+			MessageCount: len(preq.Messages),
+			ToolDefCount: len(preq.Tools),
+		})
+
 		// Run the provider turn.
+		ssink.roundReset()
+		callStart := now()
 		presult, err := h.provider.RunTurn(ctx, preq, sink)
+		callEnd := now()
+		round := &timing.Rounds[len(timing.Rounds)-1]
+		if first := ssink.takeFirstEvent(); !first.IsZero() {
+			round.StartupToFirstEventSecs = first.Sub(callStart).Seconds()
+			round.StreamSecs = callEnd.Sub(first).Seconds()
+		} else {
+			// The provider emitted no events this round (e.g. a
+			// tool-call-only round from a direct-API provider). There
+			// was never a first event to split on, so attribute the
+			// full call duration to startup and leave StreamSecs 0 —
+			// the whole wait was pre-stream latency.
+			round.StartupToFirstEventSecs = callEnd.Sub(callStart).Seconds()
+		}
 		if err != nil {
+			timing.TotalSecs = now().Sub(turnStart).Seconds()
 			sink.Emit(TurnError{Err: err, Stage: TurnErrorStageProvider})
 			return TurnResult{
 				FinalText:  finalText,
@@ -72,6 +114,7 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 				StepCount:  stepCount,
 				Usage:      totalUsage,
 				StopReason: StopReasonError,
+				Timing:     timing,
 			}, err
 		}
 
@@ -125,13 +168,20 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 		// Execute each tool call.
 		var toolMessages []ProviderMessage
 		for _, inv := range presult.ToolCalls {
+			toolStart := now()
 			toolMsg, completed, abortedExec, execErr := h.executeToolCall(ctx, inv, stepCount, runner, mcpClient, sink)
+			toolSecs := now().Sub(toolStart).Seconds()
 			if execErr != nil {
 				return partialAbortWith(finalText, allInvocations, stepCount, totalUsage), execErr
 			}
 			if abortedExec {
 				return partialAbortWith(finalText, allInvocations, stepCount, totalUsage), nil
 			}
+			timing.Tools = append(timing.Tools, ToolTiming{
+				ID:   completed.ID,
+				Name: completed.Name,
+				Secs: toolSecs,
+			})
 			allInvocations = append(allInvocations, completed)
 			toolMessages = append(toolMessages, toolMsg)
 			sessionDelta = append(sessionDelta, SessionEvent{
@@ -160,6 +210,10 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 			stopReason = StopReasonMaxSteps
 			break
 		}
+
+		// Assembly span, round N: rebuild of the next request (message
+		// appends) + the in-loop BeforeModelCall hooks.
+		assemblyStart = now()
 
 		// Reconstruct the assistant turn that emitted those tool_use blocks
 		// before appending the tool_results. Bedrock (and strict providers)
@@ -201,8 +255,10 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 		if aborted {
 			return partialAbortWith(finalText, allInvocations, stepCount, totalUsage), nil
 		}
+		assemblySecs = now().Sub(assemblyStart).Seconds()
 	}
 
+	timing.TotalSecs = now().Sub(turnStart).Seconds()
 	result := TurnResult{
 		FinalText:     finalText,
 		ToolCalls:     allInvocations,
@@ -211,6 +267,7 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 		StopReason:    stopReason,
 		ResolvedModel: resolvedModel,
 		SessionDelta:  sessionDelta,
+		Timing:        timing,
 	}
 
 	// OnTurnDone hook — may mutate SessionDelta.
@@ -509,6 +566,18 @@ func parseSessionToolCall(e SessionEvent) (ToolInvocation, bool) {
 		}, true
 	}
 	return ToolInvocation{}, false
+}
+
+// promptBytes is the marshaled size of the round's request messages —
+// the request-size lens for TurnTiming. Returns -1 on a marshal error
+// (e.g. invalid RawMessage payloads); instrumentation never fails the
+// turn.
+func promptBytes(msgs []ProviderMessage) int {
+	b, err := json.Marshal(msgs)
+	if err != nil {
+		return -1
+	}
+	return len(b)
 }
 
 func addUsage(a, b Usage) Usage {
