@@ -11,8 +11,9 @@
 // Auth: agy itself decides — Google login / credentials at ~/.gemini. Bridle
 // does not pass credentials.
 //
-// Session continuity: agy's --conversation flag resumes a previous conversation
-// by ID. The Session.ID field is passed through to --conversation.
+// Session continuity: resume uses agy's -c/--continue (most recent
+// conversation). Session.ID only signals THAT a resume is wanted — its value
+// is never passed to agy (it's a funnel uuid, not an agy conversation id).
 package antigravitycli
 
 import (
@@ -218,7 +219,15 @@ func (p *Provider) buildCLIArgs(req bridle.ProviderRequest) []string {
 		args = append(args, "--add-dir", req.Cwd)
 	}
 	if req.Session.ID != "" && !req.Session.New {
-		args = append(args, "--conversation", req.Session.ID)
+		// Resume via -c (continue the MOST RECENT conversation) rather than
+		// --conversation <id>: the funnel's Session.ID is its own (claude-
+		// shaped) uuid, never an id agy minted — and plain-text mode gives us
+		// no way to learn agy's real conversation id. agy rejects unknown ids
+		// ("Warning: conversation … not found") and starts fresh, silently
+		// dropping cross-turn memory. In a single-agent home (one agy user
+		// per pod), "most recent" IS this aspect's thread, so -c restores
+		// continuity without needing the id at all.
+		args = append(args, "-c")
 	}
 
 	args = append(args, p.ExtraArgs...)
