@@ -3,9 +3,44 @@ package subprocess
 import (
 	"context"
 	"os/exec"
+	"reflect"
+	"sort"
 	"testing"
 	"time"
 )
+
+func TestMergeEnv(t *testing.T) {
+	base := []string{"PATH=/usr/bin", "HOME=/home/x", "FOO=old"}
+
+	t.Run("empty overlay returns base unchanged", func(t *testing.T) {
+		got := MergeEnv(base, nil)
+		if !reflect.DeepEqual(got, base) {
+			t.Errorf("MergeEnv(base, nil) = %v, want %v", got, base)
+		}
+	})
+
+	t.Run("overlay replaces and appends", func(t *testing.T) {
+		got := MergeEnv(base, map[string]string{"FOO": "new", "BAR": "added"})
+		sorted := append([]string(nil), got...)
+		sort.Strings(sorted)
+		want := []string{"BAR=added", "FOO=new", "HOME=/home/x", "PATH=/usr/bin"}
+		if !reflect.DeepEqual(sorted, want) {
+			t.Errorf("MergeEnv = %v, want (any order) %v", got, want)
+		}
+		// Replacement must happen in place, not append a duplicate.
+		if len(got) != 4 {
+			t.Errorf("len = %d, want 4 (no duplicate FOO)", len(got))
+		}
+	})
+
+	t.Run("inputs are left unmodified", func(t *testing.T) {
+		baseCopy := append([]string(nil), base...)
+		_ = MergeEnv(base, map[string]string{"FOO": "new"})
+		if !reflect.DeepEqual(base, baseCopy) {
+			t.Errorf("base mutated: %v", base)
+		}
+	})
+}
 
 // TestWatchCancelSignalsOnCancel: cancelling the context must terminate
 // a long-running child via the graceful signal well inside the grace

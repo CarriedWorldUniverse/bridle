@@ -216,7 +216,7 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 	// (PATH, HOME, etc.) keeps working. Empty/nil = no overlay; the
 	// subprocess inherits the bridle host's env unchanged.
 	if len(req.ProviderEnv) > 0 {
-		cmd.Env = mergeEnv(os.Environ(), req.ProviderEnv)
+		cmd.Env = subprocess.MergeEnv(os.Environ(), req.ProviderEnv)
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -700,34 +700,6 @@ func buildPrompt(req bridle.ProviderRequest) string {
 		}
 	}
 	return ""
-}
-
-// mergeEnv overlays the per-turn key=value map onto the parent
-// process's env. Per-turn keys take precedence; any KEY=VALUE pair in
-// `base` whose KEY is in `overlay` is replaced. Both inputs are left
-// unmodified.
-func mergeEnv(base []string, overlay map[string]string) []string {
-	if len(overlay) == 0 {
-		return base
-	}
-	// Index base by KEY for O(1) replacement.
-	idx := make(map[string]int, len(base))
-	out := make([]string, len(base))
-	copy(out, base)
-	for i, kv := range out {
-		if eq := strings.IndexByte(kv, '='); eq > 0 {
-			idx[kv[:eq]] = i
-		}
-	}
-	for k, v := range overlay {
-		entry := k + "=" + v
-		if i, ok := idx[k]; ok {
-			out[i] = entry
-		} else {
-			out = append(out, entry)
-		}
-	}
-	return out
 }
 
 // isAPIError reports whether an event carries a CLI-level API error marker.

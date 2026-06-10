@@ -11,12 +11,41 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
 // graceWindow is how long WatchCancel waits after the graceful
 // termination signal before escalating to SIGKILL.
 const graceWindow = 5 * time.Second
+
+// MergeEnv overlays the per-turn key=value map onto the parent
+// process's env. Per-turn keys take precedence; any KEY=VALUE pair in
+// `base` whose KEY is in `overlay` is replaced. Both inputs are left
+// unmodified.
+func MergeEnv(base []string, overlay map[string]string) []string {
+	if len(overlay) == 0 {
+		return base
+	}
+	// Index base by KEY for O(1) replacement.
+	idx := make(map[string]int, len(base))
+	out := make([]string, len(base))
+	copy(out, base)
+	for i, kv := range out {
+		if eq := strings.IndexByte(kv, '='); eq > 0 {
+			idx[kv[:eq]] = i
+		}
+	}
+	for k, v := range overlay {
+		entry := k + "=" + v
+		if i, ok := idx[k]; ok {
+			out[i] = entry
+		} else {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
 
 // WatchCancel implements the cancel watcher for a spawned CLI process:
 // on ctx cancellation it sends termSignal, waits up to a 5s grace
