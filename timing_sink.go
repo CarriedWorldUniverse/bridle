@@ -10,6 +10,12 @@ import (
 // The harness wraps the caller's sink once at runTurn entry and passes
 // the wrapped sink to the provider, so provider implementations never
 // change.
+//
+// Threading contract: inner.Emit is called WITHOUT holding mu, so two
+// goroutines emitting concurrently may deliver to inner in non-FIFO
+// timestamp order. Every current provider serialises its stream
+// goroutine before RunTurn returns, so concurrent Emit does not occur
+// today; a future parallel-streaming provider must revisit this.
 type stampSink struct {
 	inner EventSink
 	now   func() time.Time

@@ -275,6 +275,8 @@ func NewHarness(p Provider) *Harness {
 // RunTurn drives one turn: calls the provider, executes tool calls via runner,
 // fires hooks at documented points, and emits events to sink.
 // Cancellation via ctx returns a partial TurnResult with StopReason=aborted.
+// Timing is populated on normal completion and on provider errors; it is
+// zero on context-cancellation aborts.
 // Returns ErrModelRequired if req.Model is empty.
 func (h *Harness) RunTurn(ctx context.Context, req TurnRequest, runner ToolRunner, sink EventSink) (result TurnResult, err error) {
 	if req.Model == "" {
