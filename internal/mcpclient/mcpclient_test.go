@@ -65,14 +65,61 @@ func TestConnect_EmptyConfig(t *testing.T) {
 	}
 }
 
-// TestConnect_UnknownTransport verifies that an unknown transport returns an error.
+// TestConnect_UnknownTransport verifies that a per-server connect failure
+// (here: an unknown transport) is recorded as a ServerFailure rather than
+// hard-failing Connect. NEX-596: a single bad server must not wedge the turn.
 func TestConnect_UnknownTransport(t *testing.T) {
 	ctx := context.Background()
-	_, err := mcpclient.Connect(ctx, []mcpclient.ServerSpec{{
+	c, err := mcpclient.Connect(ctx, []mcpclient.ServerSpec{{
 		Name:      "bad",
 		Transport: "grpc",
 	}})
-	if err == nil {
-		t.Fatal("expected error for unknown transport, got nil")
+	if err != nil {
+		t.Fatalf("Connect should not hard-fail on a per-server error, got: %v", err)
+	}
+	if c == nil {
+		t.Fatal("Connect returned a nil client; want a usable (partial) client")
+	}
+	defer c.Close()
+
+	failures := c.Failures()
+	if len(failures) != 1 {
+		t.Fatalf("Failures() len = %d; want 1", len(failures))
+	}
+	if failures[0].Name != "bad" {
+		t.Errorf("Failures()[0].Name = %q; want bad", failures[0].Name)
+	}
+	if failures[0].Err == nil {
+		t.Error("Failures()[0].Err is nil; want the underlying connect error")
+	}
+	if len(c.Tools()) != 0 {
+		t.Errorf("Tools() = %v; want empty (failed server contributes no tools)", c.Tools())
+	}
+}
+
+// TestConnect_BadStdioCommand verifies that a stdio server whose command
+// cannot start is skipped (recorded in Failures, no tools) and Connect
+// still returns a usable client with nil error.
+func TestConnect_BadStdioCommand(t *testing.T) {
+	ctx := context.Background()
+	c, err := mcpclient.Connect(ctx, []mcpclient.ServerSpec{{
+		Name:      "broken",
+		Transport: mcpclient.TransportStdio,
+		Command:   []string{"this-binary-does-not-exist-nex596"},
+	}})
+	if err != nil {
+		t.Fatalf("Connect should not hard-fail on a bad stdio command, got: %v", err)
+	}
+	if c == nil {
+		t.Fatal("Connect returned a nil client; want a usable (partial) client")
+	}
+	defer c.Close()
+
+	failures := c.Failures()
+	if len(failures) != 1 || failures[0].Name != "broken" {
+		t.Fatalf("Failures() = %+v; want one failure for %q", failures, "broken")
+	}
+	if c.IsMCPTool("anything") {
+		t.Error("IsMCPTool returned true; the failed server owns no tools")
 	}
 }
