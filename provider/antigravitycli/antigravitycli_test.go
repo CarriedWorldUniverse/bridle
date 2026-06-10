@@ -68,8 +68,14 @@ func TestBuildCLIArgs_NewAndResume(t *testing.T) {
 
 	req.Session = bridle.SessionHandle{ID: "session-123"}
 	args = strings.Join(p.buildCLIArgs(req), "\x00")
-	if !strings.Contains(args, "--conversation\x00session-123") {
-		t.Fatalf("resume args missing conversation: %q", args)
+	// Resume = -c (continue most recent). The funnel's session uuid must NEVER
+	// reach agy: it's not an agy conversation id, and agy rejects unknown ids
+	// ("conversation not found") — which silently dropped cross-turn memory.
+	if !strings.Contains(args, "\x00-c") {
+		t.Fatalf("resume args missing -c: %q", args)
+	}
+	if strings.Contains(args, "--conversation") || strings.Contains(args, "session-123") {
+		t.Fatalf("funnel session id leaked into agy args: %q", args)
 	}
 }
 
