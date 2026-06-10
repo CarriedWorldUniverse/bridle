@@ -368,13 +368,14 @@ func (h *Harness) enforceToolCallContract(
 	now func() time.Time,
 	round *RoundTiming,
 ) (ProviderResult, error) {
-	report := detectLeak(presult)
+	hasTools := len(preq.Tools) > 0
+	report := detectLeak(presult, hasTools)
 	if !report.detected {
 		return presult, nil // clean — zero-cost passthrough
 	}
 	sink.Emit(ToolCallRepaired{Stage: toolCallStageDetected, Detail: report.detail})
 
-	repaired := repairLeak(presult)
+	repaired := repairLeak(presult, hasTools)
 	if repaired.clean {
 		sink.Emit(ToolCallRepaired{Stage: toolCallStageRepaired, Detail: repaired.detail})
 		return applyRepair(presult, repaired), nil
@@ -401,12 +402,12 @@ func (h *Harness) enforceToolCallContract(
 
 	// Re-run detect→repair on the retried result. Cap at one retry: whatever
 	// the second round produced is what we surface (clean, or flagged).
-	retryReport := detectLeak(retryResult)
+	retryReport := detectLeak(retryResult, hasTools)
 	if !retryReport.detected {
 		return retryResult, nil // retry produced a clean turn
 	}
 	sink.Emit(ToolCallRepaired{Stage: toolCallStageDetected, Detail: retryReport.detail})
-	retryRepaired := repairLeak(retryResult)
+	retryRepaired := repairLeak(retryResult, hasTools)
 	stage := toolCallStageRepaired
 	if !retryRepaired.clean {
 		stage = toolCallStageFlagged

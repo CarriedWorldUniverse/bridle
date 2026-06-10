@@ -1,6 +1,8 @@
 package bridle
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"regexp"
 	"strings"
@@ -60,13 +62,21 @@ const retryNudge = "\n\nIMPORTANT: respond with a valid tool call or plain text 
 //     itself stripped but the channel label survived: "assistantfinal",
 //     "commentary" appearing as a control prefix.
 //
-// These patterns must stay SPECIFIC: they target the literal control-token
-// grammar, never ordinary prose. The bare-channel patterns are anchored so
-// the word "commentary" or "final" in normal text can't trip them — only
-// the control-prefix forms (e.g. "<|channel|>commentary" residue, or a
-// line that is exactly a channel marker) match. False-positive leak
-// detection is the key risk: a too-broad pattern would mangle valid output,
-// so each entry is justified against a captured leak sample.
+// These patterns must stay SPECIFIC: they target the literal harmony
+// control-token grammar, never ordinary prose. The bare-channel patterns are
+// anchored so the word "commentary" or "final" in normal text can't trip
+// them. False-positive leak detection is the key risk: a too-broad pattern
+// would mangle valid output, so each entry is justified against a captured
+// leak sample.
+//
+// EXCLUDED ON PURPOSE — these are NOT harmony leaks and must pass clean:
+//   - ChatML tokens: <|im_start|>, <|im_end|>
+//   - role tokens:   <|user|>, <|assistant|>, <|system|>, <|begin_of_text|>
+//
+// harrow/shadow legitimately emit those when explaining prompt formats or
+// writing tokenizer code. They were never seen leaking from the harmony shim,
+// so matching them would corrupt valid output on every turn. The pipe-token
+// pattern below is enumerated to the genuine harmony vocabulary only.
 //
 // Extend this var (don't replace it) when a new engine leaks a new token
 // class; add a detect-corpus test alongside.
@@ -76,23 +86,29 @@ var leakPatterns = []*regexp.Regexp{
 	// optional role word. Stripping the bare <|channel|> token alone would
 	// strand the channel-name label as orphaned text ("final", "commentary")
 	// in the surfaced output, so this composite pattern removes the label
-	// too. Must run BEFORE the bare <|word|> stripper below.
+	// too. Must run BEFORE the bare harmony-token stripper below.
 	regexp.MustCompile(`<\|(?:channel|start)\|>\s*(?:final|commentary|analysis|thought|assistant|system|user)?`),
-	// Angle-bracket harmony control tokens. Covers <|channel|>, <|message|>,
-	// <|start|>, <|end|>, <|tool_call|>, <|im_start|>, <|im_end|>, etc.
-	// The pipe-delimited <|word|> form is never valid surfaced text.
-	regexp.MustCompile(`<\|[a-zA-Z_]+\|>`),
+	// Pipe-delimited HARMONY control tokens — scoped to the exact harmony
+	// vocabulary observed leaking in the gemma A/B (channel/message/start/
+	// end/tool_call/constrain/call). This deliberately does NOT match the
+	// general <|word|> form: ChatML tokens (<|im_start|>, <|im_end|>) and
+	// the role tokens (<|user|>, <|assistant|>, <|system|>, <|begin_of_text|>)
+	// are legitimately emitted by harrow/shadow when explaining prompt
+	// formats or writing tokenizer code, and were NEVER seen leaking from
+	// harmony. Matching arbitrary <|word|> would corrupt that valid prose on
+	// every turn, so the set is enumerated to the genuine harmony controls
+	// only. Extend the alternation (don't broaden to \w+) when a new harmony
+	// token is observed leaking.
+	regexp.MustCompile(`<\|(?:channel|message|start|end|tool_call|constrain|call)\|>`),
 	// The malformed <tool_call|> / <tool_call> variants the compat shim
 	// emitted (missing the leading pipe). Anchored to the known tool/channel
 	// token names so an HTML-ish "<something>" in prose isn't caught.
 	regexp.MustCompile(`<\/?(?:tool_call|channel|message|start|end)\|?>`),
 	// Bare harmony channel markers that leaked without their <|...|> wrapper:
-	// the channel label fused to the word "channel" or appearing as the
-	// concatenated "assistantfinal" / "assistantcommentary" forms the shim
-	// produced. Anchored to the harmony vocabulary so normal use of "final"
-	// or "commentary" in prose is safe.
+	// the concatenated "assistantfinal" / "assistantcommentary" forms the
+	// shim produced. Anchored to the harmony vocabulary so normal use of
+	// "final" or "commentary" in prose is safe.
 	regexp.MustCompile(`\bassistant(?:final|commentary)\b`),
-	regexp.MustCompile(`<\|?(?:channel|constrain)\|?>?\s*(?:final|commentary|analysis|thought)\b`),
 }
 
 // jsonToolCallInText matches a JSON object that looks like a tool call the
@@ -125,18 +141,26 @@ type leakReport struct {
 // ToolInvocation (a structured call whose args still carry leaked tokens).
 // It does NOT flag a perfectly clean structured tool call — that's the
 // happy path and must pass untouched.
-func detectLeak(res ProviderResult) leakReport {
+//
+// hasTools is whether the request actually defined any tools. The
+// JSON-tool-call-as-text detection only runs when hasTools is true: a model
+// with no tools defined CANNOT have leaked a tool call, so a
+// {"name":...,"arguments":...} blob in its prose is a documented example
+// (JSON-RPC/MCP/tool-schema docs), not a leaked invocation, and must be
+// preserved (CRITICAL 2).
+func detectLeak(res ProviderResult, hasTools bool) leakReport {
 	for _, re := range leakPatterns {
 		if loc := re.FindString(res.FinalText); loc != "" {
 			return leakReport{detected: true, detail: "protocol-token:" + loc}
 		}
 	}
 	// A tool call the engine emitted as literal text rather than a
-	// structured call is a leak only when the model produced NO structured
-	// tool call (otherwise the JSON-looking text is probably legitimate
-	// prose about a call). If there are structured calls already, the
-	// text-JSON isn't the intended invocation.
-	if len(res.ToolCalls) == 0 {
+	// structured call is a leak only when (a) the request actually had tools
+	// defined and (b) the model produced NO structured tool call (otherwise
+	// the JSON-looking text is probably legitimate prose about a call). If
+	// there are no tools, or structured calls already exist, the text-JSON
+	// isn't a leaked invocation.
+	if hasTools && len(res.ToolCalls) == 0 {
 		if jsonToolCallInText.MatchString(res.FinalText) {
 			return leakReport{detected: true, detail: "tool-call-as-text"}
 		}
@@ -181,15 +205,19 @@ type repairOutcome struct {
 //   - Report clean=true when the result is usable; clean=false when, after
 //     stripping, the text is empty/garbled AND no structured call survived
 //     (the caller then retries or surfaces flagged).
-func repairLeak(res ProviderResult) repairOutcome {
+//
+// hasTools gates the tool-call-as-text extraction (CRITICAL 2): with no tools
+// defined, a JSON blob in the prose is a documented example, never a leaked
+// call, so extraction is skipped and the text is preserved.
+func repairLeak(res ProviderResult, hasTools bool) repairOutcome {
 	text := res.FinalText
 	toolCalls := res.ToolCalls
 	var extracted bool
 	var detail string
 
-	// 1. Extract a tool-call-as-text into a structured call, if present and
-	//    no structured call already exists.
-	if len(toolCalls) == 0 {
+	// 1. Extract a tool-call-as-text into a structured call, if the request
+	//    had tools, the blob is present, and no structured call already exists.
+	if hasTools && len(toolCalls) == 0 {
 		if m := jsonToolCallInText.FindStringSubmatchIndex(text); m != nil {
 			whole := text[m[0]:m[1]]
 			name := text[m[2]:m[3]]
@@ -260,13 +288,26 @@ func buildInvocationFromText(name, args string) (ToolInvocation, bool) {
 		return ToolInvocation{}, false
 	}
 	return ToolInvocation{
-		// The leaked text carried no call id; synthesize a stable marker
-		// so downstream correlation has a non-empty id. Real engines mint
-		// ids; this only fires on the repair path.
-		ID:   "repaired-toolcall",
+		// The leaked text carried no call id; synthesize one so downstream
+		// correlation has a non-empty id. It must be UNIQUE per extraction:
+		// a multi-step turn that extracts a text tool call in two separate
+		// rounds would otherwise mint duplicate ids, and strict providers
+		// (Anthropic/OpenAI/DeepSeek) reject a message history with two
+		// tool calls sharing one id. Derive the suffix from the call's
+		// content (name+args) so the id is deterministic AND distinct for
+		// distinct calls. Real engines mint ids; this only fires on the
+		// repair path.
+		ID:   "repaired-toolcall-" + shortHash(name+"\x00"+string(raw)),
 		Name: name,
 		Args: raw,
 	}, true
+}
+
+// shortHash returns a short hex digest of s, used to make a synthesized
+// repaired-toolcall id unique-per-content within a turn.
+func shortHash(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:6])
 }
 
 // stripLeakTokens removes every leaked protocol token from s. Pure
