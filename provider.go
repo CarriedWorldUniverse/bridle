@@ -72,6 +72,12 @@ type ProviderRequest struct {
 	MaxOutputTokens int
 	StopSequences   []string
 	ResponseFormat  *ResponseFormat
+
+	// ToolCallStrictness mirrors TurnRequest.ToolCallStrictness so the
+	// harness's post-provider tool-call contract step (NEX-581) can read
+	// the per-aspect knob from the lowered request. Providers themselves
+	// ignore it — the contract lives in run.go's round loop.
+	ToolCallStrictness ToolCallStrictness
 }
 
 // ResponseFormat constrains the model's output shape (NEX-299 Pass 2).

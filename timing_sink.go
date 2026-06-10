@@ -80,6 +80,9 @@ func stampEvent(ev Event, ts time.Time) Event {
 	case MCPServerFailed:
 		e.TS = ts
 		return e
+	case ToolCallRepaired:
+		e.TS = ts
+		return e
 	default:
 		return ev
 	}

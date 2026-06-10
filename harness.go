@@ -180,6 +180,15 @@ type TurnRequest struct {
 	// system prompt. Nil = free-form text (provider default).
 	ResponseFormat *ResponseFormat
 
+	// ToolCallStrictness is the per-aspect tool-call contract knob
+	// (NEX-581). It controls how hard bridle works to deliver a clean
+	// tool call or clean text when an engine leaks raw protocol tokens.
+	// Empty = repair-then-retry (the default): builders should keep it
+	// strict and never ship a degraded tool call; research aspects can
+	// set "tolerant" to accept structurally-repaired text without a
+	// retry round.
+	ToolCallStrictness ToolCallStrictness
+
 	// Cwd is the working directory for subprocess-style providers.
 	// Empty falls through to the bridle host process's cwd. Per-request
 	// rather than per-Harness because different aspects sharing one

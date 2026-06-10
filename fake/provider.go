@@ -25,7 +25,9 @@ type Step struct {
 	// Usage populates ProviderResult.Usage — the token counts the
 	// scripted engine "reported". Zero value (no fields set) models an
 	// engine that reports no usage, exercising bridle's estimated-floor
-	// path (the usage contract, NEX-581).
+	// path (the usage contract, NEX-581). Tool-call-contract tests also
+	// use it to assert the retry round's usage replaces (is not summed
+	// with) the discarded round's.
 	Usage bridle.Usage
 }
 
@@ -99,8 +101,8 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		ToolCalls:     step.ToolCalls,
 		StopReason:    stopReason,
 		ResolvedModel: step.ResolvedModel,
-		SessionDelta:  delta,
 		Usage:         step.Usage,
+		SessionDelta:  delta,
 	}, nil
 }
 
