@@ -22,8 +22,11 @@ support, MCP plumbing for direct providers, and a local tool runner.
 
 - One stable provider interface with direct-API and subprocess-stream implementations.
 - Direct API providers: `claude-api`, `openai-api`, `bedrock`, `gemini-api`, `ollama-local`.
-- Headless CLI providers: `claude-code`, `gemini-cli`, `codex-cli`, plus `claude-pty`.
+- Headless CLI providers: `claude-code`, `gemini-cli`, `codex-cli`, `antigravity-cli`, plus `claude-pty`.
 - Hook surface for model-call, tool-call, step-boundary, and turn-done behavior.
+- Per-turn timing instrumentation (`TurnTiming`) at the harness seam, broken
+  down by round and tool, so the funnel can observe where a turn spends its wall clock.
+- Shared subprocess plumbing for the CLI providers lives in `internal/subprocess`.
 - `send_comms` is just a tool the funnel supplies — bridle has no special case.
 - Funnel owns session JSONL; bridle proposes deltas.
 
@@ -42,6 +45,15 @@ calls through the bridle `ToolRunner`.
 model id to pass `--model`, or use `Model: "default"` to let the Codex CLI use
 its configured default model while still satisfying bridle's required model
 field. Existing sessions resume via `codex exec resume <session-id>`.
+
+`antigravity-cli` drives the `agy` CLI headless (plain-text, not stream-json),
+resuming via `-c` rather than a passed session id, and strips stale conversation
+warnings from the output.
+
+`ollama-local` exposes `KeepAlive` (how long the server keeps a model resident —
+defaults to 30m so gemma-class models stay warm across quiet gaps), `NumCtx`
+(the context window, mapped to `options.num_ctx`), and an `Options` map that is
+merged into the request options on every turn.
 
 ## Test
 
