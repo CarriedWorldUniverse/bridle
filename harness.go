@@ -14,15 +14,15 @@ var ErrModelRequired = errors.New("bridle: TurnRequest.Model is required")
 type ProviderID string
 
 const (
-	ProviderClaude     ProviderID = "claude-api"
-	ProviderClaudeCode ProviderID = "claude-code"
-	ProviderClaudePty  ProviderID = "claude-pty"
-	ProviderOllama     ProviderID = "ollama-local"
-	ProviderOpenAI     ProviderID = "openai-api"
-	ProviderBedrock    ProviderID = "bedrock"
-	ProviderGemini     ProviderID = "gemini-api"
-	ProviderGeminiCLI  ProviderID = "gemini-cli"
-	ProviderCodexCLI   ProviderID = "codex-cli"
+	ProviderClaude         ProviderID = "claude-api"
+	ProviderClaudeCode     ProviderID = "claude-code"
+	ProviderClaudePty      ProviderID = "claude-pty"
+	ProviderOllama         ProviderID = "ollama-local"
+	ProviderOpenAI         ProviderID = "openai-api"
+	ProviderBedrock        ProviderID = "bedrock"
+	ProviderGemini         ProviderID = "gemini-api"
+	ProviderGeminiCLI      ProviderID = "gemini-cli"
+	ProviderCodexCLI       ProviderID = "codex-cli"
 	ProviderAntigravityCLI ProviderID = "antigravity-cli"
 )
 
@@ -62,6 +62,17 @@ type Usage struct {
 	CacheReadInputTokens     int     // Anthropic prompt-cache hit count
 	CacheCreationInputTokens int     // tokens written into the prompt cache this turn
 	CostUSD                  float64 // provider-reported or estimated; 0 if unknown
+
+	// Estimated is set true when the token counts in this Usage were
+	// NOT reported by the engine — they were estimated by bridle's
+	// tokenizer as a last-resort floor (the usage contract, NEX-581).
+	// A provider that reports real usage leaves this false. The flag
+	// rides through addUsage: if ANY round of a turn was estimated, the
+	// turn total is flagged Estimated. Consumers (cost accounting) can
+	// treat estimated counts as approximate. The guarantee is that a
+	// completed turn never has silently-zero usage — it has real
+	// counts, or a flagged estimate, never nothing.
+	Estimated bool
 }
 
 // ToolInvocation records a single tool call the model made.

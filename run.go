@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/CarriedWorldUniverse/bridle/internal/mcpclient"
 )
@@ -143,7 +144,15 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 			}
 			finalText += presult.FinalText
 		}
-		totalUsage = addUsage(totalUsage, presult.Usage)
+		// Usage contract (NEX-581): normalize the round's usage before
+		// folding it into the turn total. A provider that reported real
+		// counts passes through untouched; one that returned zero gets a
+		// flagged, tokenizer-estimated floor so the turn never reports
+		// silently-zero usage. Engine-agnostic — same gate for every
+		// provider. The estimate is sourced from this round's prompt
+		// (the assembled request) and response (FinalText).
+		roundUsage := normalizeUsage(presult.Usage, promptText(preq), presult.FinalText)
+		totalUsage = addUsage(totalUsage, roundUsage)
 		sessionDelta = append(sessionDelta, presult.SessionDelta...)
 		// Track the most recent non-empty ResolvedModel — last round
 		// wins, so multi-step turns where the model id might shift
@@ -590,6 +599,27 @@ func promptBytes(msgs []ProviderMessage) int {
 	return len(b)
 }
 
+// promptText concatenates the round's input text — the system prompt
+// plus every message's content — into a single string for the usage
+// estimator (NEX-581). It is an approximation of the input the model
+// received: tool-schema and structural framing aren't counted, but the
+// prose dominates the token count and this is only a last-resort floor
+// for engines that report no usage at all.
+func promptText(req ProviderRequest) string {
+	var b strings.Builder
+	if req.AppendSystemPrompt != "" {
+		b.WriteString(req.AppendSystemPrompt)
+		b.WriteByte('\n')
+	}
+	for _, m := range req.Messages {
+		if m.Content != "" {
+			b.WriteString(m.Content)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
 func addUsage(a, b Usage) Usage {
 	return Usage{
 		InputTokens:              a.InputTokens + b.InputTokens,
@@ -597,6 +627,10 @@ func addUsage(a, b Usage) Usage {
 		CacheReadInputTokens:     a.CacheReadInputTokens + b.CacheReadInputTokens,
 		CacheCreationInputTokens: a.CacheCreationInputTokens + b.CacheCreationInputTokens,
 		CostUSD:                  a.CostUSD + b.CostUSD,
+		// If ANY round contributed an estimated count, the turn total is
+		// approximate — flag it so cost accounting knows not to trust it
+		// as exact.
+		Estimated: a.Estimated || b.Estimated,
 	}
 }
 

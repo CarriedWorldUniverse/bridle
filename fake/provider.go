@@ -22,6 +22,11 @@ type Step struct {
 	ResolvedModel string
 	// Err causes the provider to return this error instead of a result.
 	Err error
+	// Usage populates ProviderResult.Usage — the token counts the
+	// scripted engine "reported". Zero value (no fields set) models an
+	// engine that reports no usage, exercising bridle's estimated-floor
+	// path (the usage contract, NEX-581).
+	Usage bridle.Usage
 }
 
 // Provider is a scripted fake that replays a sequence of Steps.
@@ -95,6 +100,7 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		StopReason:    stopReason,
 		ResolvedModel: step.ResolvedModel,
 		SessionDelta:  delta,
+		Usage:         step.Usage,
 	}, nil
 }
 
