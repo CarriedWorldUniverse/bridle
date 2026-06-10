@@ -6,6 +6,7 @@ import (
 	"io"
 	"os/exec"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -187,14 +188,22 @@ func TestWatchCancelSignalsOnCancel(t *testing.T) {
 	waitDone := make(chan error, 1)
 	go func() { waitDone <- cmd.Wait() }()
 
+	// Unix: the term signal lands immediately and sleep dies well inside
+	// 3s. Windows: Process.Signal(os.Interrupt) is not deliverable, so
+	// the process only dies at WatchCancel's 5s grace-period Kill — the
+	// deadline must sit beyond the grace window to assert that fallback.
+	deadline := 3 * time.Second
+	if runtime.GOOS == "windows" {
+		deadline = 8 * time.Second
+	}
 	select {
 	case err := <-waitDone:
 		if err == nil {
 			t.Fatalf("expected sleep to be killed by signal, got clean exit")
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(deadline):
 		_ = cmd.Process.Kill()
-		t.Fatalf("process not terminated within 3s of cancel")
+		t.Fatalf("process not terminated within %v of cancel", deadline)
 	}
 	close(procExited)
 
