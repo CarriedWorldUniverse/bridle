@@ -79,9 +79,13 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 			return partialAbortWith(finalText, allInvocations, stepCount, totalUsage), nil
 		}
 
-		// One RoundTiming entry per provider call.
+		// One RoundTiming entry per provider call. Request-size fields
+		// reflect the request as the provider receives it (post-hook).
 		timing.Rounds = append(timing.Rounds, RoundTiming{
 			AssemblySecs: assemblySecs,
+			PromptBytes:  promptBytes(preq.Messages),
+			MessageCount: len(preq.Messages),
+			ToolDefCount: len(preq.Tools),
 		})
 
 		// Run the provider turn.
@@ -164,13 +168,20 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 		// Execute each tool call.
 		var toolMessages []ProviderMessage
 		for _, inv := range presult.ToolCalls {
+			toolStart := now()
 			toolMsg, completed, abortedExec, execErr := h.executeToolCall(ctx, inv, stepCount, runner, mcpClient, sink)
+			toolSecs := now().Sub(toolStart).Seconds()
 			if execErr != nil {
 				return partialAbortWith(finalText, allInvocations, stepCount, totalUsage), execErr
 			}
 			if abortedExec {
 				return partialAbortWith(finalText, allInvocations, stepCount, totalUsage), nil
 			}
+			timing.Tools = append(timing.Tools, ToolTiming{
+				ID:   completed.ID,
+				Name: completed.Name,
+				Secs: toolSecs,
+			})
 			allInvocations = append(allInvocations, completed)
 			toolMessages = append(toolMessages, toolMsg)
 			sessionDelta = append(sessionDelta, SessionEvent{
@@ -555,6 +566,18 @@ func parseSessionToolCall(e SessionEvent) (ToolInvocation, bool) {
 		}, true
 	}
 	return ToolInvocation{}, false
+}
+
+// promptBytes is the marshaled size of the round's request messages —
+// the request-size lens for TurnTiming. Returns -1 on a marshal error
+// (e.g. invalid RawMessage payloads); instrumentation never fails the
+// turn.
+func promptBytes(msgs []ProviderMessage) int {
+	b, err := json.Marshal(msgs)
+	if err != nil {
+		return -1
+	}
+	return len(b)
 }
 
 func addUsage(a, b Usage) Usage {
