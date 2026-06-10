@@ -1,0 +1,245 @@
+package subprocess
+
+import (
+	"context"
+	"errors"
+	"io"
+	"os/exec"
+	"reflect"
+	"runtime"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+
+	bridle "github.com/CarriedWorldUniverse/bridle"
+)
+
+func TestClassify(t *testing.T) {
+	patterns := []Pattern{
+		{Kind: "auth_failed", Patterns: []string{"not logged in", "authentication"}, Message: "auth msg"},
+		{Kind: "rate_limit", Patterns: []string{"rate_limit", "rate limited"}, Message: "rate msg"},
+		{Kind: "timeout", Patterns: []string{"timeout", "timed out"}, Message: "timeout msg"},
+	}
+
+	cases := []struct {
+		name     string
+		stderr   string
+		wantKind bridle.ProviderErrorKind
+		wantMsg  string
+		wantOK   bool
+	}{
+		{"no match", "something else entirely", "", "", false},
+		{"empty stderr", "", "", "", false},
+		{"case-insensitive match", "ERROR: Not Logged In.", "auth_failed", "auth msg", true},
+		{"first group wins over later", "authentication timed out", "auth_failed", "auth msg", true},
+		{"later group", "request timed out", "timeout", "timeout msg", true},
+		{"substring inside payload", `{"error":{"type":"rate_limit_error"}}`, "rate_limit", "rate msg", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kind, msg, ok := Classify(tc.stderr, patterns)
+			if kind != tc.wantKind || msg != tc.wantMsg || ok != tc.wantOK {
+				t.Errorf("Classify(%q) = (%q, %q, %v), want (%q, %q, %v)",
+					tc.stderr, kind, msg, ok, tc.wantKind, tc.wantMsg, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestScanJSONLines(t *testing.T) {
+	t.Run("trims, skips empties, dispatches in order", func(t *testing.T) {
+		input := "  {\"a\":1}  \n\n\t\n{\"b\":2}\nnot json\n"
+		var got []string
+		err := ScanJSONLines(strings.NewReader(input), func(line []byte) {
+			got = append(got, string(line))
+		})
+		if err != nil {
+			t.Fatalf("ScanJSONLines: %v", err)
+		}
+		want := []string{`{"a":1}`, `{"b":2}`, "not json"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("lines = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("handles lines beyond default bufio limit", func(t *testing.T) {
+		big := `{"payload":"` + strings.Repeat("x", 200*1024) + `"}`
+		var n, maxLen int
+		err := ScanJSONLines(strings.NewReader(big+"\n"), func(line []byte) {
+			n++
+			if len(line) > maxLen {
+				maxLen = len(line)
+			}
+		})
+		if err != nil {
+			t.Fatalf("ScanJSONLines: %v", err)
+		}
+		if n != 1 || maxLen != len(big) {
+			t.Errorf("n=%d maxLen=%d, want 1 line of %d bytes", n, maxLen, len(big))
+		}
+	})
+
+	t.Run("line over 1MB cap returns scanner error", func(t *testing.T) {
+		huge := strings.Repeat("y", 2*1024*1024)
+		err := ScanJSONLines(strings.NewReader(huge), func([]byte) {})
+		if err == nil {
+			t.Fatalf("expected bufio.ErrTooLong-style error, got nil")
+		}
+	})
+
+	t.Run("read error propagates", func(t *testing.T) {
+		wantErr := errors.New("boom")
+		err := ScanJSONLines(io.MultiReader(strings.NewReader("{\"a\":1}\n"), &failingReader{err: wantErr}), func([]byte) {})
+		if !errors.Is(err, wantErr) {
+			t.Errorf("err = %v, want %v", err, wantErr)
+		}
+	})
+}
+
+type failingReader struct{ err error }
+
+func (f *failingReader) Read([]byte) (int, error) { return 0, f.err }
+
+func TestLastUserPrompt(t *testing.T) {
+	cases := []struct {
+		name string
+		msgs []bridle.ProviderMessage
+		want string
+	}{
+		{"nil messages", nil, ""},
+		{"no user messages", []bridle.ProviderMessage{
+			{Role: "system", Content: "sys"},
+			{Role: "assistant", Content: "hi"},
+		}, ""},
+		{"single user", []bridle.ProviderMessage{
+			{Role: "user", Content: "hello"},
+		}, "hello"},
+		{"most recent user wins", []bridle.ProviderMessage{
+			{Role: "user", Content: "first"},
+			{Role: "assistant", Content: "reply"},
+			{Role: "user", Content: "second"},
+			{Role: "assistant", Content: "trailing"},
+		}, "second"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := LastUserPrompt(tc.msgs); got != tc.want {
+				t.Errorf("LastUserPrompt = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMergeEnv(t *testing.T) {
+	base := []string{"PATH=/usr/bin", "HOME=/home/x", "FOO=old"}
+
+	t.Run("empty overlay returns base unchanged", func(t *testing.T) {
+		got := MergeEnv(base, nil)
+		if !reflect.DeepEqual(got, base) {
+			t.Errorf("MergeEnv(base, nil) = %v, want %v", got, base)
+		}
+	})
+
+	t.Run("overlay replaces and appends", func(t *testing.T) {
+		got := MergeEnv(base, map[string]string{"FOO": "new", "BAR": "added"})
+		sorted := append([]string(nil), got...)
+		sort.Strings(sorted)
+		want := []string{"BAR=added", "FOO=new", "HOME=/home/x", "PATH=/usr/bin"}
+		if !reflect.DeepEqual(sorted, want) {
+			t.Errorf("MergeEnv = %v, want (any order) %v", got, want)
+		}
+		// Replacement must happen in place, not append a duplicate.
+		if len(got) != 4 {
+			t.Errorf("len = %d, want 4 (no duplicate FOO)", len(got))
+		}
+	})
+
+	t.Run("inputs are left unmodified", func(t *testing.T) {
+		baseCopy := append([]string(nil), base...)
+		_ = MergeEnv(base, map[string]string{"FOO": "new"})
+		if !reflect.DeepEqual(base, baseCopy) {
+			t.Errorf("base mutated: %v", base)
+		}
+	})
+}
+
+// TestWatchCancelSignalsOnCancel: cancelling the context must terminate
+// a long-running child via the graceful signal well inside the grace
+// window (sleep exits on SIGTERM, so no SIGKILL escalation is needed).
+func TestWatchCancelSignalsOnCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	procExited := make(chan struct{})
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		WatchCancel(ctx, cmd, procExited, TermSignal())
+	}()
+
+	cancel()
+
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cmd.Wait() }()
+
+	// Unix: the term signal lands immediately and sleep dies well inside
+	// 3s. Windows: Process.Signal(os.Interrupt) is not deliverable, so
+	// the process only dies at WatchCancel's 5s grace-period Kill — the
+	// deadline must sit beyond the grace window to assert that fallback.
+	deadline := 3 * time.Second
+	if runtime.GOOS == "windows" {
+		deadline = 8 * time.Second
+	}
+	select {
+	case err := <-waitDone:
+		if err == nil {
+			t.Fatalf("expected sleep to be killed by signal, got clean exit")
+		}
+	case <-time.After(deadline):
+		_ = cmd.Process.Kill()
+		t.Fatalf("process not terminated within %v of cancel", deadline)
+	}
+	close(procExited)
+
+	select {
+	case <-watcherDone:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("watcher did not return after procExited closed")
+	}
+}
+
+// TestWatchCancelNaturalExit: when the process exits on its own and
+// procExited is closed, the watcher must return without signaling.
+func TestWatchCancelNaturalExit(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	procExited := make(chan struct{})
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		WatchCancel(ctx, cmd, procExited, TermSignal())
+	}()
+
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	close(procExited)
+
+	select {
+	case <-watcherDone:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("watcher did not return after natural exit")
+	}
+}

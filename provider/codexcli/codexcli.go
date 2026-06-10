@@ -12,7 +12,6 @@
 package codexcli
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -22,9 +21,9 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
-	"time"
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
+	"github.com/CarriedWorldUniverse/bridle/internal/subprocess"
 )
 
 const providerID = bridle.ProviderCodexCLI
@@ -103,7 +102,7 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 	}
 	cmd.Stdin = strings.NewReader("")
 	if len(req.ProviderEnv) > 0 {
-		cmd.Env = mergeEnv(os.Environ(), req.ProviderEnv)
+		cmd.Env = subprocess.MergeEnv(os.Environ(), req.ProviderEnv)
 	}
 
 	var stderr bytes.Buffer
@@ -117,21 +116,12 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		return bridle.ProviderResult{}, fmt.Errorf("codexcli: start: %w", err)
 	}
 
+	// Cancel watcher: graceful signal + grace period + Kill. procExited
+	// is closed AFTER cmd.Wait() returns; see subprocess.WatchCancel for
+	// the full contract. codexcli keeps its own sigterm() (os.Kill on
+	// Windows, vs os.Interrupt for the other CLI providers).
 	procExited := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = cmd.Process.Signal(sigterm())
-			timer := time.NewTimer(5 * time.Second)
-			defer timer.Stop()
-			select {
-			case <-timer.C:
-				_ = cmd.Process.Kill()
-			case <-procExited:
-			}
-		case <-procExited:
-		}
-	}()
+	go subprocess.WatchCancel(ctx, cmd, procExited, sigterm())
 
 	streamDone := make(chan struct{})
 	var result bridle.ProviderResult
@@ -236,7 +226,7 @@ func (p *Provider) buildCLIArgs(req bridle.ProviderRequest) []string {
 	}
 	args = append(args, p.ExtraArgs...)
 
-	prompt := buildPrompt(req)
+	prompt := subprocess.LastUserPrompt(req.Messages)
 	if prompt != "" {
 		args = append(args, prompt)
 	}
@@ -352,19 +342,16 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 
 	pendingCalls := map[string]bridle.ToolCallStart{}
 
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 || line[0] != '{' {
-			continue
+	perLine := func(line []byte) {
+		if line[0] != '{' {
+			return
 		}
 
 		var head struct {
 			Type string `json:"type"`
 		}
 		if err := json.Unmarshal(line, &head); err != nil {
-			continue
+			return
 		}
 
 		switch head.Type {
@@ -409,7 +396,7 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 				Item codexItem `json:"item"`
 			}
 			if err := json.Unmarshal(line, &ev); err != nil {
-				continue
+				return
 			}
 			switch ev.Item.Type {
 			case "agent_message":
@@ -468,7 +455,7 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 		}
 	}
 
-	if err := scanner.Err(); err != nil && err != io.EOF {
+	if err := subprocess.ScanJSONLines(r, perLine); err != nil {
 		return bridle.ProviderResult{}, fmt.Errorf("codexcli: stream read: %w", err)
 	}
 
@@ -502,65 +489,36 @@ type codexItem struct {
 	Status           string `json:"status"`
 }
 
-func buildPrompt(req bridle.ProviderRequest) string {
-	for i := len(req.Messages) - 1; i >= 0; i-- {
-		if req.Messages[i].Role == "user" {
-			return req.Messages[i].Content
-		}
-	}
-	return ""
-}
-
-func mergeEnv(base []string, overlay map[string]string) []string {
-	if len(overlay) == 0 {
-		return base
-	}
-	idx := make(map[string]int, len(base))
-	out := make([]string, len(base))
-	copy(out, base)
-	for i, kv := range out {
-		if eq := strings.IndexByte(kv, '='); eq > 0 {
-			idx[kv[:eq]] = i
-		}
-	}
-	for k, v := range overlay {
-		entry := k + "=" + v
-		if i, ok := idx[k]; ok {
-			out[i] = entry
-		} else {
-			out = append(out, entry)
-		}
-	}
-	return out
+// errorPatterns is codexcli's ordered stderr classification table —
+// the same groups, order and substrings as the previous inline switch
+// (note: timeout before network, unlike claudecode). See
+// subprocess.Pattern for matching semantics.
+var errorPatterns = []subprocess.Pattern{
+	{
+		Kind:     bridle.ProviderErrorAuthFailed,
+		Patterns: []string{"not logged in", "authentication", "login"},
+		Message:  "codexcli: authentication failed. Check Codex login or OPENAI_API_KEY",
+	},
+	{
+		Kind:     bridle.ProviderErrorRateLimit,
+		Patterns: []string{"rate limit", "rate_limit"},
+		Message:  "codexcli: rate limited",
+	},
+	{
+		Kind:     bridle.ProviderErrorTimeout,
+		Patterns: []string{"timeout", "timed out"},
+		Message:  "codexcli: request timed out",
+	},
+	{
+		Kind:     bridle.ProviderErrorNetworkError,
+		Patterns: []string{"connection refused", "no route to host", "connection reset"},
+		Message:  "codexcli: network error connecting to provider",
+	},
 }
 
 func classifyProviderError(stderr string, waitErr error) *bridle.ProviderError {
-	lower := strings.ToLower(stderr)
-	switch {
-	case strings.Contains(lower, "not logged in") || strings.Contains(lower, "authentication") || strings.Contains(lower, "login"):
-		return &bridle.ProviderError{
-			Kind:    bridle.ProviderErrorAuthFailed,
-			Message: "codexcli: authentication failed. Check Codex login or OPENAI_API_KEY",
-			Err:     waitErr,
-		}
-	case strings.Contains(lower, "rate limit") || strings.Contains(lower, "rate_limit"):
-		return &bridle.ProviderError{
-			Kind:    bridle.ProviderErrorRateLimit,
-			Message: "codexcli: rate limited",
-			Err:     waitErr,
-		}
-	case strings.Contains(lower, "timeout") || strings.Contains(lower, "timed out"):
-		return &bridle.ProviderError{
-			Kind:    bridle.ProviderErrorTimeout,
-			Message: "codexcli: request timed out",
-			Err:     waitErr,
-		}
-	case strings.Contains(lower, "connection refused") || strings.Contains(lower, "no route to host") || strings.Contains(lower, "connection reset"):
-		return &bridle.ProviderError{
-			Kind:    bridle.ProviderErrorNetworkError,
-			Message: "codexcli: network error connecting to provider",
-			Err:     waitErr,
-		}
+	if kind, msg, ok := subprocess.Classify(stderr, errorPatterns); ok {
+		return &bridle.ProviderError{Kind: kind, Message: msg, Err: waitErr}
 	}
 	return &bridle.ProviderError{
 		Kind:    bridle.ProviderErrorSubprocessExit,
