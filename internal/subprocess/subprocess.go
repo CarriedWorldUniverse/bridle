@@ -8,7 +8,10 @@
 package subprocess
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -16,6 +19,38 @@ import (
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
 )
+
+// scanBufBytes is the line buffer cap for ScanJSONLines. CLI stream
+// events can carry large embedded payloads (full tool results, spilled
+// file contents), so the default 64K bufio limit is not enough.
+const scanBufBytes = 1024 * 1024
+
+// ScanJSONLines reads r line by line with a 1MB buffer, trims
+// whitespace, skips empty lines, and hands every remaining line to
+// perLine. Event-schema dispatch — including skipping non-JSON banner
+// lines a CLI may print on stdout — stays inside each provider's
+// callback.
+//
+// The line slice aliases the scanner's internal buffer and is only
+// valid for the duration of the callback.
+//
+// Returns the scanner error, if any (io.EOF is treated as clean
+// termination); callers wrap it with their provider prefix.
+func ScanJSONLines(r io.Reader, perLine func(line []byte)) error {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, scanBufBytes), scanBufBytes)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		perLine(line)
+	}
+	if err := scanner.Err(); err != nil && err != io.EOF {
+		return err
+	}
+	return nil
+}
 
 // LastUserPrompt returns the most recent user message — NOT the full
 // SessionTail — for use as a CLI prompt argument.

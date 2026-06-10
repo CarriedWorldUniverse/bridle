@@ -13,7 +13,6 @@
 package claudecode
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -360,17 +359,10 @@ func parseStream(r io.Reader, sink bridle.EventSink) (parseResult, error) {
 
 	pendingCalls := map[string]bridle.ToolCallStart{}
 
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-
+	perLine := func(line []byte) {
 		var event map[string]json.RawMessage
 		if jsonErr := json.Unmarshal(line, &event); jsonErr != nil {
-			continue // malformed line — skip, don't fail the turn
+			return // malformed line — skip, don't fail the turn
 		}
 
 		var eventType string
@@ -532,7 +524,7 @@ func parseStream(r io.Reader, sink bridle.EventSink) (parseResult, error) {
 		}
 	}
 
-	if err := scanner.Err(); err != nil && err != io.EOF {
+	if err := subprocess.ScanJSONLines(r, perLine); err != nil {
 		return parseResult{}, fmt.Errorf("claudecode: stream read: %w", err)
 	}
 

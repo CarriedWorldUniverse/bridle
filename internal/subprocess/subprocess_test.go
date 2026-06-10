@@ -2,14 +2,71 @@ package subprocess
 
 import (
 	"context"
+	"errors"
+	"io"
 	"os/exec"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
 )
+
+func TestScanJSONLines(t *testing.T) {
+	t.Run("trims, skips empties, dispatches in order", func(t *testing.T) {
+		input := "  {\"a\":1}  \n\n\t\n{\"b\":2}\nnot json\n"
+		var got []string
+		err := ScanJSONLines(strings.NewReader(input), func(line []byte) {
+			got = append(got, string(line))
+		})
+		if err != nil {
+			t.Fatalf("ScanJSONLines: %v", err)
+		}
+		want := []string{`{"a":1}`, `{"b":2}`, "not json"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("lines = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("handles lines beyond default bufio limit", func(t *testing.T) {
+		big := `{"payload":"` + strings.Repeat("x", 200*1024) + `"}`
+		var n, maxLen int
+		err := ScanJSONLines(strings.NewReader(big+"\n"), func(line []byte) {
+			n++
+			if len(line) > maxLen {
+				maxLen = len(line)
+			}
+		})
+		if err != nil {
+			t.Fatalf("ScanJSONLines: %v", err)
+		}
+		if n != 1 || maxLen != len(big) {
+			t.Errorf("n=%d maxLen=%d, want 1 line of %d bytes", n, maxLen, len(big))
+		}
+	})
+
+	t.Run("line over 1MB cap returns scanner error", func(t *testing.T) {
+		huge := strings.Repeat("y", 2*1024*1024)
+		err := ScanJSONLines(strings.NewReader(huge), func([]byte) {})
+		if err == nil {
+			t.Fatalf("expected bufio.ErrTooLong-style error, got nil")
+		}
+	})
+
+	t.Run("read error propagates", func(t *testing.T) {
+		wantErr := errors.New("boom")
+		err := ScanJSONLines(io.MultiReader(strings.NewReader("{\"a\":1}\n"), &failingReader{err: wantErr}), func([]byte) {})
+		if !errors.Is(err, wantErr) {
+			t.Errorf("err = %v, want %v", err, wantErr)
+		}
+	})
+}
+
+type failingReader struct{ err error }
+
+func (f *failingReader) Read([]byte) (int, error) { return 0, f.err }
 
 func TestLastUserPrompt(t *testing.T) {
 	cases := []struct {

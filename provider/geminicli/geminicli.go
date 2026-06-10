@@ -16,7 +16,6 @@
 package geminicli
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -188,21 +187,18 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 
 	pendingCalls := map[string]bridle.ToolCallStart{}
 
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 || line[0] != '{' {
+	perLine := func(line []byte) {
+		if line[0] != '{' {
 			// CLI prints free-form banners ("YOLO mode is enabled.", etc.) on stdout.
 			// Skip anything that isn't a JSON object.
-			continue
+			return
 		}
 
 		var head struct {
 			Type string `json:"type"`
 		}
 		if err := json.Unmarshal(line, &head); err != nil {
-			continue
+			return
 		}
 
 		switch head.Type {
@@ -312,7 +308,7 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 		}
 	}
 
-	if err := scanner.Err(); err != nil && err != io.EOF {
+	if err := subprocess.ScanJSONLines(r, perLine); err != nil {
 		return bridle.ProviderResult{}, fmt.Errorf("geminicli: stream read: %w", err)
 	}
 

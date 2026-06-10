@@ -12,7 +12,6 @@
 package codexcli
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -343,19 +342,16 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 
 	pendingCalls := map[string]bridle.ToolCallStart{}
 
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 || line[0] != '{' {
-			continue
+	perLine := func(line []byte) {
+		if line[0] != '{' {
+			return
 		}
 
 		var head struct {
 			Type string `json:"type"`
 		}
 		if err := json.Unmarshal(line, &head); err != nil {
-			continue
+			return
 		}
 
 		switch head.Type {
@@ -400,7 +396,7 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 				Item codexItem `json:"item"`
 			}
 			if err := json.Unmarshal(line, &ev); err != nil {
-				continue
+				return
 			}
 			switch ev.Item.Type {
 			case "agent_message":
@@ -459,7 +455,7 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 		}
 	}
 
-	if err := scanner.Err(); err != nil && err != io.EOF {
+	if err := subprocess.ScanJSONLines(r, perLine); err != nil {
 		return bridle.ProviderResult{}, fmt.Errorf("codexcli: stream read: %w", err)
 	}
 
