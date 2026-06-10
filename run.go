@@ -10,6 +10,10 @@ import (
 
 // runTurn is the inner implementation, called by RunTurn after the panic trap.
 func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunner, sink EventSink) (TurnResult, error) {
+	now := h.clock()
+	turnStart := now()
+	var timing TurnTiming
+
 	// Connect MCP servers and merge tool surface (direct-api providers only).
 	var mcpClient *mcpclient.Client
 	caps := h.provider.Capabilities()
@@ -30,6 +34,9 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 		req.Tools = merged
 	}
 
+	// Assembly span, round 0: lowerRequest + BeforeModelCall hooks.
+	assemblyStart := now()
+
 	// Lower TurnRequest → ProviderRequest.
 	preq := lowerRequest(req)
 
@@ -46,6 +53,7 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 	if aborted {
 		return partialAbort(), nil
 	}
+	assemblySecs := now().Sub(assemblyStart).Seconds()
 
 	var (
 		allInvocations []ToolInvocation
@@ -62,9 +70,15 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 			return partialAbortWith(finalText, allInvocations, stepCount, totalUsage), nil
 		}
 
+		// One RoundTiming entry per provider call.
+		timing.Rounds = append(timing.Rounds, RoundTiming{
+			AssemblySecs: assemblySecs,
+		})
+
 		// Run the provider turn.
 		presult, err := h.provider.RunTurn(ctx, preq, sink)
 		if err != nil {
+			timing.TotalSecs = now().Sub(turnStart).Seconds()
 			sink.Emit(TurnError{Err: err, Stage: TurnErrorStageProvider})
 			return TurnResult{
 				FinalText:  finalText,
@@ -72,6 +86,7 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 				StepCount:  stepCount,
 				Usage:      totalUsage,
 				StopReason: StopReasonError,
+				Timing:     timing,
 			}, err
 		}
 
@@ -161,6 +176,10 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 			break
 		}
 
+		// Assembly span, round N: rebuild of the next request (message
+		// appends) + the in-loop BeforeModelCall hooks.
+		assemblyStart = now()
+
 		// Reconstruct the assistant turn that emitted those tool_use blocks
 		// before appending the tool_results. Bedrock (and strict providers)
 		// require assistant{tool_use} → user{tool_result} alternation; sending
@@ -201,8 +220,10 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 		if aborted {
 			return partialAbortWith(finalText, allInvocations, stepCount, totalUsage), nil
 		}
+		assemblySecs = now().Sub(assemblyStart).Seconds()
 	}
 
+	timing.TotalSecs = now().Sub(turnStart).Seconds()
 	result := TurnResult{
 		FinalText:     finalText,
 		ToolCalls:     allInvocations,
@@ -211,6 +232,7 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 		StopReason:    stopReason,
 		ResolvedModel: resolvedModel,
 		SessionDelta:  sessionDelta,
+		Timing:        timing,
 	}
 
 	// OnTurnDone hook — may mutate SessionDelta.

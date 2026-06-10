@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 )
 
 // ErrModelRequired is returned by RunTurn when TurnRequest.Model is empty.
@@ -216,6 +217,33 @@ type TurnResult struct {
 	StopReason    StopReason
 	ResolvedModel string         // model id the upstream API reported; empty when unknown
 	SessionDelta  []SessionEvent // events to propose to the funnel-owned JSONL
+	Timing        TurnTiming     // per-turn timing instrumentation; zero value = not recorded
+}
+
+// RoundTiming captures where one provider round spent its time and
+// what it sent. Secs floats (not Durations) so the struct marshals
+// readably into TurnFrame JSON downstream.
+type RoundTiming struct {
+	AssemblySecs            float64 // request assembly + BeforeModelCall hooks
+	StartupToFirstEventSecs float64 // provider call -> first sink event (CLI lane: spawn+startup+TTFT)
+	StreamSecs              float64 // first event -> provider call return
+	PromptBytes             int     // marshaled request messages size
+	MessageCount            int
+	ToolDefCount            int
+}
+
+// ToolTiming is one tool call's wall-clock duration.
+type ToolTiming struct {
+	ID   string
+	Name string
+	Secs float64
+}
+
+// TurnTiming aggregates per-turn instrumentation. Zero value = not recorded.
+type TurnTiming struct {
+	Rounds    []RoundTiming
+	Tools     []ToolTiming
+	TotalSecs float64
 }
 
 // EventSink receives events as the turn unfolds.
@@ -227,6 +255,16 @@ type EventSink interface {
 type Harness struct {
 	provider Provider
 	hooks    hookRegistry
+	now      func() time.Time // injectable clock; nil means time.Now
+}
+
+// clock returns the harness's time source: the injected now func when
+// set (tests), time.Now otherwise.
+func (h *Harness) clock() func() time.Time {
+	if h.now != nil {
+		return h.now
+	}
+	return time.Now
 }
 
 // NewHarness creates a Harness backed by the given provider.
