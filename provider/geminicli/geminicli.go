@@ -24,9 +24,9 @@ import (
 	"io"
 	"os/exec"
 	"strings"
-	"time"
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
+	"github.com/CarriedWorldUniverse/bridle/internal/subprocess"
 )
 
 const providerID = bridle.ProviderGeminiCLI
@@ -131,32 +131,11 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		return bridle.ProviderResult{}, fmt.Errorf("geminicli: start: %w", err)
 	}
 
-	// Cancel watcher: SIGTERM + grace period + SIGKILL.
-	//
-	// procExited is closed AFTER cmd.Wait() returns. The watcher waits
-	// on either ctx cancellation OR the process exiting naturally; on
-	// cancellation it sends SIGTERM and waits up to the grace period
-	// for procExited before SIGKILLing. Without procExited being closed
-	// externally, the watcher would (a) leak on natural exit and (b)
-	// always SIGKILL after the full grace period even when the process
-	// already responded to SIGTERM.
+	// Cancel watcher: SIGTERM + grace period + SIGKILL. procExited is
+	// closed AFTER cmd.Wait() returns; see subprocess.WatchCancel for
+	// the full contract.
 	procExited := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = cmd.Process.Signal(sigterm())
-			timer := time.NewTimer(5 * time.Second)
-			defer timer.Stop()
-			select {
-			case <-timer.C:
-				_ = cmd.Process.Kill()
-			case <-procExited:
-				// Process exited cleanly during grace period — no SIGKILL needed.
-			}
-		case <-procExited:
-			// Natural exit — nothing to do.
-		}
-	}()
+	go subprocess.WatchCancel(ctx, cmd, procExited, subprocess.TermSignal())
 
 	streamDone := make(chan struct{})
 	var result bridle.ProviderResult
@@ -190,11 +169,12 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 // parseStream reads stream-json lines and maps them to bridle events + result.
 //
 // Event shapes (observed from gemini CLI v0.x stream-json output):
-//   {"type":"init", "session_id":"<uuid>", "model":"<id>"}
-//   {"type":"message", "role":"user|assistant", "content":"...", "delta":true?}
-//   {"type":"tool_use", "tool_name":"...", "tool_id":"...", "parameters":{...}}
-//   {"type":"tool_result", "tool_id":"...", "status":"success|..."}
-//   {"type":"result", "status":"success|...", "stats":{"input_tokens":..,"output_tokens":..,"tool_calls":..}}
+//
+//	{"type":"init", "session_id":"<uuid>", "model":"<id>"}
+//	{"type":"message", "role":"user|assistant", "content":"...", "delta":true?}
+//	{"type":"tool_use", "tool_name":"...", "tool_id":"...", "parameters":{...}}
+//	{"type":"tool_result", "tool_id":"...", "status":"success|..."}
+//	{"type":"result", "status":"success|...", "stats":{"input_tokens":..,"output_tokens":..,"tool_calls":..}}
 func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, error) {
 	var (
 		finalText    string

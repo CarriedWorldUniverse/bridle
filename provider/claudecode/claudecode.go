@@ -29,6 +29,7 @@ import (
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
 	"github.com/CarriedWorldUniverse/bridle/internal/normalize"
+	"github.com/CarriedWorldUniverse/bridle/internal/subprocess"
 )
 
 const providerID = bridle.ProviderClaudeCode
@@ -228,32 +229,11 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 		return bridle.ProviderResult{}, fmt.Errorf("claudecode: start: %w", err)
 	}
 
-	// Cancel watcher: SIGTERM + grace period + SIGKILL.
-	//
-	// procExited is closed AFTER cmd.Wait() returns (see below). The
-	// watcher waits on either ctx cancellation OR the process exiting
-	// naturally; on cancellation it sends SIGTERM and waits up to the
-	// grace period for procExited before SIGKILLing. Without procExited
-	// being closed externally, the watcher would (a) leak on natural
-	// exit and (b) always SIGKILL after the full grace period even when
-	// the process already responded to SIGTERM.
+	// Cancel watcher: SIGTERM + grace period + SIGKILL. procExited is
+	// closed AFTER cmd.Wait() returns (see below); see
+	// subprocess.WatchCancel for the full contract.
 	procExited := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = cmd.Process.Signal(sigterm())
-			timer := time.NewTimer(5 * time.Second)
-			defer timer.Stop()
-			select {
-			case <-timer.C:
-				_ = cmd.Process.Kill()
-			case <-procExited:
-				// Process exited cleanly during grace period — no SIGKILL needed.
-			}
-		case <-procExited:
-			// Natural exit — nothing to do.
-		}
-	}()
+	go subprocess.WatchCancel(ctx, cmd, procExited, subprocess.TermSignal())
 
 	streamDone := make(chan struct{})
 	var presult parseResult

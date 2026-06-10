@@ -22,9 +22,9 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
-	"time"
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
+	"github.com/CarriedWorldUniverse/bridle/internal/subprocess"
 )
 
 const providerID = bridle.ProviderCodexCLI
@@ -117,21 +117,12 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		return bridle.ProviderResult{}, fmt.Errorf("codexcli: start: %w", err)
 	}
 
+	// Cancel watcher: graceful signal + grace period + Kill. procExited
+	// is closed AFTER cmd.Wait() returns; see subprocess.WatchCancel for
+	// the full contract. codexcli keeps its own sigterm() (os.Kill on
+	// Windows, vs os.Interrupt for the other CLI providers).
 	procExited := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = cmd.Process.Signal(sigterm())
-			timer := time.NewTimer(5 * time.Second)
-			defer timer.Stop()
-			select {
-			case <-timer.C:
-				_ = cmd.Process.Kill()
-			case <-procExited:
-			}
-		case <-procExited:
-		}
-	}()
+	go subprocess.WatchCancel(ctx, cmd, procExited, sigterm())
 
 	streamDone := make(chan struct{})
 	var result bridle.ProviderResult
