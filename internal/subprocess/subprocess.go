@@ -20,6 +20,40 @@ import (
 	bridle "github.com/CarriedWorldUniverse/bridle"
 )
 
+// Pattern maps a set of case-insensitive substring patterns to a
+// bridle.ProviderError classification. Order matters: Classify
+// iterates a pattern list top-to-bottom and returns the first match,
+// so each provider orders its own list (e.g. auth before the generic
+// "exit" path, network before timeout where the network signal is
+// more actionable).
+//
+// Patterns are matched against the CLI's stderr (lowercased). They're
+// mostly stable API error codes ("authentication_failed",
+// "rate_limit_error", "overloaded_error") that surface either as plain
+// text or embedded in stream-json error events; a few are network
+// shell errors ("connection refused", etc.).
+type Pattern struct {
+	Kind     bridle.ProviderErrorKind
+	Patterns []string
+	Message  string
+}
+
+// Classify matches the CLI's stderr against the provider's ordered
+// pattern list and returns the first matching classification. ok is
+// false when nothing matches; callers supply their own fallback
+// (typically a generic subprocess-exit ProviderError).
+func Classify(stderr string, patterns []Pattern) (kind bridle.ProviderErrorKind, msg string, ok bool) {
+	lower := strings.ToLower(stderr)
+	for _, p := range patterns {
+		for _, sub := range p.Patterns {
+			if strings.Contains(lower, sub) {
+				return p.Kind, p.Message, true
+			}
+		}
+	}
+	return "", "", false
+}
+
 // scanBufBytes is the line buffer cap for ScanJSONLines. CLI stream
 // events can carry large embedded payloads (full tool results, spilled
 // file contents), so the default 64K bufio limit is not enough.

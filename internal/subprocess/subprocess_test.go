@@ -14,6 +14,38 @@ import (
 	bridle "github.com/CarriedWorldUniverse/bridle"
 )
 
+func TestClassify(t *testing.T) {
+	patterns := []Pattern{
+		{Kind: "auth_failed", Patterns: []string{"not logged in", "authentication"}, Message: "auth msg"},
+		{Kind: "rate_limit", Patterns: []string{"rate_limit", "rate limited"}, Message: "rate msg"},
+		{Kind: "timeout", Patterns: []string{"timeout", "timed out"}, Message: "timeout msg"},
+	}
+
+	cases := []struct {
+		name     string
+		stderr   string
+		wantKind bridle.ProviderErrorKind
+		wantMsg  string
+		wantOK   bool
+	}{
+		{"no match", "something else entirely", "", "", false},
+		{"empty stderr", "", "", "", false},
+		{"case-insensitive match", "ERROR: Not Logged In.", "auth_failed", "auth msg", true},
+		{"first group wins over later", "authentication timed out", "auth_failed", "auth msg", true},
+		{"later group", "request timed out", "timeout", "timeout msg", true},
+		{"substring inside payload", `{"error":{"type":"rate_limit_error"}}`, "rate_limit", "rate msg", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kind, msg, ok := Classify(tc.stderr, patterns)
+			if kind != tc.wantKind || msg != tc.wantMsg || ok != tc.wantOK {
+				t.Errorf("Classify(%q) = (%q, %q, %v), want (%q, %q, %v)",
+					tc.stderr, kind, msg, ok, tc.wantKind, tc.wantMsg, tc.wantOK)
+			}
+		})
+	}
+}
+
 func TestScanJSONLines(t *testing.T) {
 	t.Run("trims, skips empties, dispatches in order", func(t *testing.T) {
 		input := "  {\"a\":1}  \n\n\t\n{\"b\":2}\nnot json\n"

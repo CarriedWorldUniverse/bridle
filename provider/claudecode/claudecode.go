@@ -703,78 +703,56 @@ func isRetryable(err error) bool {
 	return false
 }
 
-// classificationPattern maps a set of case-insensitive substring
-// patterns to a bridle.ProviderError classification. Order matters:
-// classifyProviderError iterates errorPatterns top-to-bottom and
-// returns the first match. Auth comes before the generic "exit" path,
-// network before timeout (timeout often co-occurs with network errors
-// but the network signal is more actionable), and so on.
-//
-// Patterns are matched against the CLI's stderr (lowercased). They're
-// mostly stable API error codes ("authentication_failed",
-// "rate_limit_error", "overloaded_error") that surface either as plain
-// text or embedded in stream-json error events; a few are network
-// shell errors ("connection refused", etc.).
-type classificationPattern struct {
-	kind     bridle.ProviderErrorKind
-	patterns []string
-	message  string
-}
-
-var errorPatterns = []classificationPattern{
+// errorPatterns is claudecode's ordered stderr classification table.
+// Auth comes before the generic "exit" path, network before timeout
+// (timeout often co-occurs with network errors but the network signal
+// is more actionable), and so on. See subprocess.Pattern for matching
+// semantics.
+var errorPatterns = []subprocess.Pattern{
 	{
 		// Auth failures — the dominant case. claude-code writes the
 		// synthetic "Not logged in. Please run /login." response to
 		// stderr + exits 1 when ANTHROPIC_API_KEY is missing/unset/
 		// expired.
-		kind:     bridle.ProviderErrorAuthFailed,
-		patterns: []string{"not logged in", "authentication_failed", "run /login"},
-		message:  "claude-code: authentication failed — aspect not authenticated to provider. Check ANTHROPIC_API_KEY or run /login",
+		Kind:     bridle.ProviderErrorAuthFailed,
+		Patterns: []string{"not logged in", "authentication_failed", "run /login"},
+		Message:  "claude-code: authentication failed — aspect not authenticated to provider. Check ANTHROPIC_API_KEY or run /login",
 	},
 	{
-		kind:     bridle.ProviderErrorRateLimit,
-		patterns: []string{"rate_limit", "rate limited"},
-		message:  "claude-code: rate limited — provider throttled the request",
+		Kind:     bridle.ProviderErrorRateLimit,
+		Patterns: []string{"rate_limit", "rate limited"},
+		Message:  "claude-code: rate limited — provider throttled the request",
 	},
 	{
-		kind:     bridle.ProviderErrorServerError,
-		patterns: []string{"server_error", "internal server error", "overloaded"},
-		message:  "claude-code: provider server error — the API returned an internal error",
+		Kind:     bridle.ProviderErrorServerError,
+		Patterns: []string{"server_error", "internal server error", "overloaded"},
+		Message:  "claude-code: provider server error — the API returned an internal error",
 	},
 	{
-		kind:     bridle.ProviderErrorNetworkError,
-		patterns: []string{"connection refused", "no route to host", "connection reset", "eof"},
-		message:  "claude-code: network error connecting to provider",
+		Kind:     bridle.ProviderErrorNetworkError,
+		Patterns: []string{"connection refused", "no route to host", "connection reset", "eof"},
+		Message:  "claude-code: network error connecting to provider",
 	},
 	{
-		kind:     bridle.ProviderErrorTimeout,
-		patterns: []string{"timeout", "deadline exceeded", "timed out"},
-		message:  "claude-code: request timed out",
+		Kind:     bridle.ProviderErrorTimeout,
+		Patterns: []string{"timeout", "deadline exceeded", "timed out"},
+		Message:  "claude-code: request timed out",
 	},
 	{
-		kind:     bridle.ProviderErrorTLSError,
-		patterns: []string{"certificate", "ssl", "tls"},
-		message:  "claude-code: TLS error connecting to provider",
+		Kind:     bridle.ProviderErrorTLSError,
+		Patterns: []string{"certificate", "ssl", "tls"},
+		Message:  "claude-code: TLS error connecting to provider",
 	},
 }
 
 // classifyProviderError inspects the CLI's stderr and classifies the
 // subprocess error into a bridle.ProviderError so the activity log
 // surfaces a distinct diagnosis string instead of an opaque exit code.
-// Iterates errorPatterns and returns the first match; falls back to a
-// generic subprocess-error ProviderError when no pattern matches.
+// Matches errorPatterns in order; falls back to a generic
+// subprocess-error ProviderError when no pattern matches.
 func classifyProviderError(stderr string, waitErr error) *bridle.ProviderError {
-	lower := strings.ToLower(stderr)
-	for _, cp := range errorPatterns {
-		for _, sub := range cp.patterns {
-			if strings.Contains(lower, sub) {
-				return &bridle.ProviderError{
-					Kind:    cp.kind,
-					Message: cp.message,
-					Err:     waitErr,
-				}
-			}
-		}
+	if kind, msg, ok := subprocess.Classify(stderr, errorPatterns); ok {
+		return &bridle.ProviderError{Kind: kind, Message: msg, Err: waitErr}
 	}
 	return &bridle.ProviderError{
 		Kind:    bridle.ProviderErrorSubprocessExit,

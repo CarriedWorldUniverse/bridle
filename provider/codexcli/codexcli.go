@@ -489,33 +489,36 @@ type codexItem struct {
 	Status           string `json:"status"`
 }
 
+// errorPatterns is codexcli's ordered stderr classification table —
+// the same groups, order and substrings as the previous inline switch
+// (note: timeout before network, unlike claudecode). See
+// subprocess.Pattern for matching semantics.
+var errorPatterns = []subprocess.Pattern{
+	{
+		Kind:     bridle.ProviderErrorAuthFailed,
+		Patterns: []string{"not logged in", "authentication", "login"},
+		Message:  "codexcli: authentication failed. Check Codex login or OPENAI_API_KEY",
+	},
+	{
+		Kind:     bridle.ProviderErrorRateLimit,
+		Patterns: []string{"rate limit", "rate_limit"},
+		Message:  "codexcli: rate limited",
+	},
+	{
+		Kind:     bridle.ProviderErrorTimeout,
+		Patterns: []string{"timeout", "timed out"},
+		Message:  "codexcli: request timed out",
+	},
+	{
+		Kind:     bridle.ProviderErrorNetworkError,
+		Patterns: []string{"connection refused", "no route to host", "connection reset"},
+		Message:  "codexcli: network error connecting to provider",
+	},
+}
+
 func classifyProviderError(stderr string, waitErr error) *bridle.ProviderError {
-	lower := strings.ToLower(stderr)
-	switch {
-	case strings.Contains(lower, "not logged in") || strings.Contains(lower, "authentication") || strings.Contains(lower, "login"):
-		return &bridle.ProviderError{
-			Kind:    bridle.ProviderErrorAuthFailed,
-			Message: "codexcli: authentication failed. Check Codex login or OPENAI_API_KEY",
-			Err:     waitErr,
-		}
-	case strings.Contains(lower, "rate limit") || strings.Contains(lower, "rate_limit"):
-		return &bridle.ProviderError{
-			Kind:    bridle.ProviderErrorRateLimit,
-			Message: "codexcli: rate limited",
-			Err:     waitErr,
-		}
-	case strings.Contains(lower, "timeout") || strings.Contains(lower, "timed out"):
-		return &bridle.ProviderError{
-			Kind:    bridle.ProviderErrorTimeout,
-			Message: "codexcli: request timed out",
-			Err:     waitErr,
-		}
-	case strings.Contains(lower, "connection refused") || strings.Contains(lower, "no route to host") || strings.Contains(lower, "connection reset"):
-		return &bridle.ProviderError{
-			Kind:    bridle.ProviderErrorNetworkError,
-			Message: "codexcli: network error connecting to provider",
-			Err:     waitErr,
-		}
+	if kind, msg, ok := subprocess.Classify(stderr, errorPatterns); ok {
+		return &bridle.ProviderError{Kind: kind, Message: msg, Err: waitErr}
 	}
 	return &bridle.ProviderError{
 		Kind:    bridle.ProviderErrorSubprocessExit,
