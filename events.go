@@ -46,6 +46,16 @@ type TurnDone struct {
 	TS     time.Time // stamped by the harness at emission; zero outside a harness turn
 }
 
+// MCPServerFailed fires when an MCP server fails to connect/initialize
+// during turn setup. NEX-596: such a failure is non-fatal — the server's
+// tools are dropped and the turn proceeds with the remaining servers.
+// This event surfaces the dropped server for observability.
+type MCPServerFailed struct {
+	Server string
+	Err    error
+	TS     time.Time // stamped by the harness at emission; zero outside a harness turn
+}
+
 // TurnError fires when the provider or harness hits a non-recoverable
 // error. Never panics across the harness boundary.
 //
@@ -96,12 +106,12 @@ const (
 type ProviderErrorKind string
 
 const (
-	ProviderErrorAuthFailed     ProviderErrorKind = "auth_failed"
-	ProviderErrorRateLimit      ProviderErrorKind = "rate_limit"
-	ProviderErrorServerError    ProviderErrorKind = "server_error"
-	ProviderErrorNetworkError   ProviderErrorKind = "network_error"
-	ProviderErrorTimeout        ProviderErrorKind = "timeout"
-	ProviderErrorTLSError       ProviderErrorKind = "tls_error"
+	ProviderErrorAuthFailed   ProviderErrorKind = "auth_failed"
+	ProviderErrorRateLimit    ProviderErrorKind = "rate_limit"
+	ProviderErrorServerError  ProviderErrorKind = "server_error"
+	ProviderErrorNetworkError ProviderErrorKind = "network_error"
+	ProviderErrorTimeout      ProviderErrorKind = "timeout"
+	ProviderErrorTLSError     ProviderErrorKind = "tls_error"
 	// ProviderErrorSubprocessExit is the fallback kind used when a
 	// subprocess-style provider exited non-zero and no other
 	// classification matched. Callers can filter for this via
@@ -136,9 +146,10 @@ func IsProviderErrorKind(err error, kind ProviderErrorKind) bool {
 	return false
 }
 
-func (ModelChunk) event()     {}
-func (ToolCallStart) event()  {}
-func (ToolCallResult) event() {}
-func (StepBoundary) event()   {}
-func (TurnDone) event()       {}
-func (TurnError) event()      {}
+func (ModelChunk) event()      {}
+func (ToolCallStart) event()   {}
+func (ToolCallResult) event()  {}
+func (StepBoundary) event()    {}
+func (TurnDone) event()        {}
+func (TurnError) event()       {}
+func (MCPServerFailed) event() {}

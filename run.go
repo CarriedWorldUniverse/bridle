@@ -31,9 +31,19 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 		var err error
 		mcpClient, err = mcpclient.Connect(ctx, specs)
 		if err != nil {
+			// NEX-596: per-server failures no longer hard-fail Connect.
+			// A genuine returned error here is catastrophic — preserve
+			// the StopReasonError path for it.
 			return TurnResult{StopReason: StopReasonError}, err
 		}
 		defer mcpClient.Close()
+
+		// NEX-596: a failing MCP server is skipped, not fatal. Surface
+		// each dropped server for observability and proceed with the
+		// tools from the servers that connected.
+		for _, f := range mcpClient.Failures() {
+			sink.Emit(MCPServerFailed{Server: f.Name, Err: f.Err})
+		}
 
 		mcpTools := mcpClient.Tools()
 		merged, err := mergeToolSurface(req.Tools, mcpTools)

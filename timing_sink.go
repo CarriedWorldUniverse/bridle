@@ -77,6 +77,9 @@ func stampEvent(ev Event, ts time.Time) Event {
 	case TurnError:
 		e.TS = ts
 		return e
+	case MCPServerFailed:
+		e.TS = ts
+		return e
 	default:
 		return ev
 	}

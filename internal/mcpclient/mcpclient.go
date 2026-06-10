@@ -39,9 +39,18 @@ type ToolDef struct {
 	InputSchema json.RawMessage
 }
 
+// ServerFailure records a per-server connect/initialize/list-tools
+// failure. The owning Client stays usable with the remaining servers'
+// tools; failures are surfaced via Client.Failures() for observability.
+type ServerFailure struct {
+	Name string
+	Err  error
+}
+
 // Client manages connections to one or more MCP servers.
 type Client struct {
-	conns []*serverConn
+	conns    []*serverConn
+	failures []ServerFailure
 }
 
 type serverConn struct {
@@ -52,6 +61,14 @@ type serverConn struct {
 
 // Connect opens connections to all servers in specs, calls Initialize +
 // ListTools, and returns a ready Client. The caller must Close() it.
+//
+// NEX-596: a per-server connect/initialize/list-tools failure is NOT
+// fatal. The bad server is skipped — its tools are dropped and it is
+// recorded in Failures() — and Connect continues to the next spec. Only
+// the servers that connected successfully are kept, so the returned
+// Client is usable with a partial tool surface. Connect returns a nil
+// error in this case; the caller should inspect Failures() to surface
+// the dropped servers for observability.
 func Connect(ctx context.Context, specs []ServerSpec) (*Client, error) {
 	if len(specs) == 0 {
 		return &Client{}, nil
@@ -60,12 +77,21 @@ func Connect(ctx context.Context, specs []ServerSpec) (*Client, error) {
 	for _, spec := range specs {
 		conn, err := connectServer(ctx, spec)
 		if err != nil {
-			c.Close()
-			return nil, fmt.Errorf("mcpclient: connect %q: %w", spec.Name, err)
+			c.failures = append(c.failures, ServerFailure{
+				Name: spec.Name,
+				Err:  fmt.Errorf("mcpclient: connect %q: %w", spec.Name, err),
+			})
+			continue
 		}
 		c.conns = append(c.conns, conn)
 	}
 	return c, nil
+}
+
+// Failures returns the per-server connect failures recorded during
+// Connect. Empty when every server connected.
+func (c *Client) Failures() []ServerFailure {
+	return c.failures
 }
 
 func connectServer(ctx context.Context, spec ServerSpec) (*serverConn, error) {
