@@ -14,6 +14,15 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 	turnStart := now()
 	var timing TurnTiming
 
+	// Wrap the caller's sink ONCE: every event the harness or the
+	// provider emits from here on is timestamp-stamped, and the
+	// decorator records each round's first-event time for the
+	// startup/stream split. Providers receive the wrapped sink, so
+	// provider-emitted events get stamped for free — zero provider
+	// changes.
+	ssink := &stampSink{inner: sink, now: now}
+	sink = ssink
+
 	// Connect MCP servers and merge tool surface (direct-api providers only).
 	var mcpClient *mcpclient.Client
 	caps := h.provider.Capabilities()
@@ -76,7 +85,22 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 		})
 
 		// Run the provider turn.
+		ssink.roundReset()
+		callStart := now()
 		presult, err := h.provider.RunTurn(ctx, preq, sink)
+		callEnd := now()
+		round := &timing.Rounds[len(timing.Rounds)-1]
+		if first := ssink.takeFirstEvent(); !first.IsZero() {
+			round.StartupToFirstEventSecs = first.Sub(callStart).Seconds()
+			round.StreamSecs = callEnd.Sub(first).Seconds()
+		} else {
+			// The provider emitted no events this round (e.g. a
+			// tool-call-only round from a direct-API provider). There
+			// was never a first event to split on, so attribute the
+			// full call duration to startup and leave StreamSecs 0 —
+			// the whole wait was pre-stream latency.
+			round.StartupToFirstEventSecs = callEnd.Sub(callStart).Seconds()
+		}
 		if err != nil {
 			timing.TotalSecs = now().Sub(turnStart).Seconds()
 			sink.Emit(TurnError{Err: err, Stage: TurnErrorStageProvider})

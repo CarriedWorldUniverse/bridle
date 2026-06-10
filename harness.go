@@ -283,7 +283,9 @@ func (h *Harness) RunTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 	defer func() {
 		if r := recover(); r != nil {
 			e := panicErr(r)
-			sink.Emit(TurnError{Err: e, Stage: TurnErrorStageHarnessRecover})
+			// Stamp directly: this emit bypasses runTurn's stampSink
+			// (the panic unwound past it), so TS would otherwise be zero.
+			sink.Emit(TurnError{Err: e, Stage: TurnErrorStageHarnessRecover, TS: h.clock()()})
 			result.StopReason = StopReasonError
 			err = e
 		}
