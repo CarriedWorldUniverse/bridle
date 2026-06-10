@@ -140,3 +140,26 @@ func TestRunTurn_DoesNotMutateProviderOptions(t *testing.T) {
 		t.Errorf("p.Options mutated by RunTurn: got %#v, want %#v", p.Options, want)
 	}
 }
+
+// TestRunTurn_NumCtxWinsConflict pins the documented precedence: an
+// explicit NumCtx overrides a conflicting num_ctx in Options.
+func TestRunTurn_NumCtxWinsConflict(t *testing.T) {
+	h := &capturingChatHandler{}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	p := ollama.NewWithURL(srv.URL)
+	p.NumCtx = 8192
+	p.Options = map[string]any{"num_ctx": 4096}
+
+	runTurn(t, p)
+
+	body := h.body(t)
+	opts, ok := body["options"].(map[string]any)
+	if !ok {
+		t.Fatalf("options is %#v, want a JSON object", body["options"])
+	}
+	if got, want := opts["num_ctx"], float64(8192); got != want {
+		t.Errorf("options.num_ctx = %#v, want %v (NumCtx must win over Options)", got, want)
+	}
+}
