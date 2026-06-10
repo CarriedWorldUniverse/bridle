@@ -664,6 +664,8 @@ func assertEventOrder(t *testing.T, events []bridle.Event, types ...string) {
 			got = append(got, "TurnDone")
 		case bridle.TurnError:
 			got = append(got, "TurnError")
+		case bridle.ToolCallRepaired:
+			got = append(got, "ToolCallRepaired")
 		}
 	}
 	if len(got) != len(types) {
