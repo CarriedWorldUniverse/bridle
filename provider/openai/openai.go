@@ -91,6 +91,19 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		params.Tools = tools
 	}
 
+	// Usage contract (NEX-581 / NEX-589): request usage on the streaming
+	// response. Without stream_options.include_usage the OpenAI Chat
+	// Completions streaming wire omits the usage block entirely, so the
+	// accumulated completion reports zero — the hole the live A/B caught
+	// on the openai-compat shim (ollama /v1) and vLLM. Setting it makes
+	// the final chunk carry prompt/completion token counts, which
+	// extractResult lowers into Usage. Compat servers that ignore the
+	// flag still return zero; bridle's normalizeUsage floor catches
+	// those at the harness layer.
+	params.StreamOptions = openai.ChatCompletionStreamOptionsParam{
+		IncludeUsage: openaiparam.NewOpt(true),
+	}
+
 	// NEX-299 Pass 2: thread the sampling + output knobs the OpenAI
 	// Chat Completions API exposes. Nil pointers / zero values stay
 	// unset (omitzero on the SDK param).
