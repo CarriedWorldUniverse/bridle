@@ -47,6 +47,119 @@ func TestClassify(t *testing.T) {
 	}
 }
 
+func TestSharedPatterns_ActionableClasses(t *testing.T) {
+	cases := []struct {
+		name     string
+		stderr   string
+		wantKind bridle.ProviderErrorKind
+	}{
+		// AUTH — the headline class. A codex 401 (expired auth.json /
+		// wrong endpoint) that prints no friendly "not logged in" string
+		// must still classify as AUTH, not fall through to exit-1.
+		{"bare 401", "Error: request failed with status 401", bridle.ProviderErrorAuthFailed},
+		{"403", "HTTP 403 Forbidden", bridle.ProviderErrorAuthFailed},
+		{"unauthorized", "server returned: Unauthorized", bridle.ProviderErrorAuthFailed},
+		{"invalid api key", "invalid api key provided", bridle.ProviderErrorAuthFailed},
+		{"expired token", "token expired, please re-authenticate", bridle.ProviderErrorAuthFailed},
+		// RATE_LIMIT
+		{"429", "got HTTP 429 from upstream", bridle.ProviderErrorRateLimit},
+		{"quota", "you have exceeded your quota", bridle.ProviderErrorRateLimit},
+		{"too many requests", "429 Too Many Requests", bridle.ProviderErrorRateLimit},
+		// NETWORK
+		{"connection refused", "dial tcp 1.2.3.4:443: connection refused", bridle.ProviderErrorNetworkError},
+		{"dns", "lookup api.example.com: no such host", bridle.ProviderErrorNetworkError},
+		{"unreachable", "connect: network is unreachable", bridle.ProviderErrorNetworkError},
+		// CONFIG
+		{"binary not found", "exec: \"codex\": executable file not found in $PATH", bridle.ProviderErrorConfig},
+		{"missing config", "missing config file at ~/.codex/config.toml", bridle.ProviderErrorConfig},
+		{"command not found", "/bin/sh: codex: command not found", bridle.ProviderErrorConfig},
+		// SUBPROCESS_CRASH
+		{"segfault", "Segmentation fault (core dumped)", bridle.ProviderErrorCrash},
+		{"oom", "fatal: out of memory", bridle.ProviderErrorCrash},
+		{"killed", "Killed", bridle.ProviderErrorCrash},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kind, msg, ok := Classify(tc.stderr, SharedPatterns("testcli"))
+			if !ok {
+				t.Fatalf("Classify(%q) did not match; want kind %q", tc.stderr, tc.wantKind)
+			}
+			if kind != tc.wantKind {
+				t.Errorf("Classify(%q) kind = %q, want %q", tc.stderr, kind, tc.wantKind)
+			}
+			if !strings.HasPrefix(msg, "testcli:") {
+				t.Errorf("message %q not prefixed with provider id", msg)
+			}
+			if strings.Contains(strings.ToLower(msg), "exit status") {
+				t.Errorf("message leaks raw exit code: %q", msg)
+			}
+		})
+	}
+}
+
+func TestClassifyWithFallback_ProviderWinsThenShared(t *testing.T) {
+	// Provider-specific pattern takes precedence (CLI-accurate wording).
+	provider := []Pattern{
+		{Kind: bridle.ProviderErrorAuthFailed, Patterns: []string{"not logged in"}, Message: "provider-worded auth"},
+	}
+
+	t.Run("provider pattern wins", func(t *testing.T) {
+		kind, msg, ok := ClassifyWithFallback("Not logged in.", "codexcli", provider)
+		if !ok || kind != bridle.ProviderErrorAuthFailed {
+			t.Fatalf("kind=%q ok=%v, want auth_failed", kind, ok)
+		}
+		if msg != "provider-worded auth" {
+			t.Errorf("msg = %q, want provider-worded", msg)
+		}
+	})
+
+	t.Run("shared fallback catches bare 401", func(t *testing.T) {
+		// codex 401 case: provider table has no "401" entry, shared does.
+		kind, msg, ok := ClassifyWithFallback("Error: status 401 unauthorized", "codexcli", provider)
+		if !ok || kind != bridle.ProviderErrorAuthFailed {
+			t.Fatalf("kind=%q ok=%v, want auth_failed via shared fallback", kind, ok)
+		}
+		if !strings.HasPrefix(msg, "codexcli:") {
+			t.Errorf("shared message not prefixed with codexcli: %q", msg)
+		}
+	})
+
+	t.Run("no match anywhere", func(t *testing.T) {
+		_, _, ok := ClassifyWithFallback("some unrelated noise", "codexcli", provider)
+		if ok {
+			t.Error("expected no match")
+		}
+	})
+}
+
+func TestIsResumeNotFound(t *testing.T) {
+	cases := []struct {
+		name   string
+		stderr string
+		want   bool
+	}{
+		{"codex no such thread", "Error: no such thread 'abc-123'", true},
+		{"codex session not found", "session not found", true},
+		{"claude no conversation", "No conversation found with session id xyz", true},
+		{"gemini invalid resume", "invalid resume index: 99", true},
+		{"corrupt", "session file is corrupt", true},
+		{"does not exist", "checkpoint 5 does not exist", true},
+		// Must NOT trip on transient / auth — those retry/surface as-is.
+		{"auth not resume", "401 unauthorized", false},
+		{"rate not resume", "429 too many requests", false},
+		{"network not resume", "connection refused", false},
+		{"empty", "", false},
+		{"unrelated", "some other failure", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsResumeNotFound(tc.stderr); got != tc.want {
+				t.Errorf("IsResumeNotFound(%q) = %v, want %v", tc.stderr, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestScanJSONLines(t *testing.T) {
 	t.Run("trims, skips empties, dispatches in order", func(t *testing.T) {
 		input := "  {\"a\":1}  \n\n\t\n{\"b\":2}\nnot json\n"

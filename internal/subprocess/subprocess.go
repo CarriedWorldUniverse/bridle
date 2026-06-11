@@ -54,6 +54,152 @@ func Classify(stderr string, patterns []Pattern) (kind bridle.ProviderErrorKind,
 	return "", "", false
 }
 
+// SharedPatterns returns the cross-provider, actionable error-class
+// table used as a fallback layer beneath each CLI provider's own
+// pattern list. It recognizes the failure classes that bite operators
+// in headless/dispatch lanes regardless of which CLI surfaced them,
+// and maps each to a ProviderError kind with a message that says WHAT
+// to do.
+//
+// The set is intentionally extendable: a provider composes its own
+// (more specific, CLI-worded) patterns FIRST and appends these so a
+// generic signal still classifies. Order within this list is
+// significant — auth before rate before network before config before
+// crash — and Classify returns the first match, so the more
+// actionable / more specific classes lead.
+//
+// Each provider passes its own ID into the messages via the prefix
+// argument so the surfaced text names the failing CLI ("codexcli:
+// provider auth failed …").
+//
+// The substrings are deliberately broad, code-level signals:
+//   - AUTH: HTTP 401/403, "unauthorized", "forbidden", "invalid api
+//     key", "expired"/"token expired", "login required". This is the
+//     class that made a codex 401 (expired auth.json / wrong endpoint)
+//     surface as a bare exit-1 before NEX-588 — "401"/"unauthorized"
+//     now classify as AUTH even when the CLI prints no friendly
+//     "not logged in" string.
+//   - RATE_LIMIT: HTTP 429, "rate limit"/"rate_limit", "quota",
+//     "too many requests".
+//   - NETWORK: connection refused/reset, DNS failures ("no such
+//     host", "name resolution"), "network is unreachable", "timeout"
+//     at the socket layer.
+//   - CONFIG: binary not found, missing config/profile, "no such
+//     file", "command not found" — non-transient setup faults.
+//   - SUBPROCESS_CRASH: fatal signals (segfault/SIGSEGV/SIGABRT),
+//     OOM ("out of memory"/"killed"), "panic"/"stack overflow".
+func SharedPatterns(prefix string) []Pattern {
+	return []Pattern{
+		{
+			Kind: bridle.ProviderErrorAuthFailed,
+			Patterns: []string{
+				"401", "403", "unauthorized", "forbidden",
+				"invalid api key", "invalid_api_key", "invalid x-api-key",
+				"authentication", "not logged in", "login required",
+				"login-required", "expired", "token expired",
+				"permission denied (publickey", // git/ssh auth, distinct from filesystem perms
+			},
+			Message: prefix + ": provider auth failed (401/403) — refresh credentials (check auth.json / API key / base URL)",
+		},
+		{
+			Kind: bridle.ProviderErrorRateLimit,
+			Patterns: []string{
+				"429", "rate limit", "rate_limit", "ratelimit",
+				"quota", "too many requests",
+			},
+			Message: prefix + ": rate limited (429/quota) — back off and retry later",
+		},
+		{
+			Kind: bridle.ProviderErrorNetworkError,
+			Patterns: []string{
+				"connection refused", "connection reset", "no route to host",
+				"network is unreachable", "no such host", "name resolution",
+				"dns", "could not resolve", "i/o timeout", "tcp",
+			},
+			Message: prefix + ": network error reaching provider — check connectivity / DNS / proxy",
+		},
+		{
+			Kind: bridle.ProviderErrorConfig,
+			Patterns: []string{
+				"command not found", "executable file not found",
+				"no such file or directory", "not found in $path",
+				"missing config", "config not found", "unknown profile",
+				"unknown flag", "invalid argument",
+			},
+			Message: prefix + ": configuration error — missing binary/config (not retryable; fix setup)",
+		},
+		{
+			Kind: bridle.ProviderErrorCrash,
+			Patterns: []string{
+				"segmentation fault", "sigsegv", "sigabrt", "core dumped",
+				"out of memory", "oomkilled", "killed", "fatal error",
+				"stack overflow", "runtime: out of memory",
+			},
+			Message: prefix + ": subprocess crashed (signal/OOM) — the CLI process itself died abnormally",
+		},
+	}
+}
+
+// ClassifyWithFallback matches stderr against the provider's own
+// pattern list first, then the shared cross-provider table, returning
+// the first match from either. This is the recommended classification
+// entry point for subprocess providers: provider-specific patterns win
+// (they carry CLI-accurate wording) while the shared layer guarantees a
+// bare "401" / "429" / "segfault" still gets an actionable kind instead
+// of falling through to a generic exit-status error.
+//
+// prefix is the provider ID used in the shared messages.
+func ClassifyWithFallback(stderr, prefix string, providerPatterns []Pattern) (kind bridle.ProviderErrorKind, msg string, ok bool) {
+	if k, m, found := Classify(stderr, providerPatterns); found {
+		return k, m, true
+	}
+	return Classify(stderr, SharedPatterns(prefix))
+}
+
+// resumeNotFoundSignals are the stderr substrings (lowercased) that
+// indicate a session resume failed because the referenced session is
+// genuinely missing or corrupt — NOT because of a transient/auth/
+// network fault. This distinction matters: a missing session should
+// degrade to a fresh session (the prior context is unrecoverable
+// anyway), whereas a transient error must be retried against the SAME
+// session so a builder mid-task does not silently lose its context.
+//
+// The list is the cross-provider union of how the CLIs word a missing
+// session: codex ("no such thread", "session not found", "thread … not
+// found"), claude-code ("no conversation found", "session … not
+// found"/"does not exist"), gemini ("no checkpoint", "invalid resume
+// index"). Extend here when a new provider/CLI version surfaces a
+// different phrasing.
+var resumeNotFoundSignals = []string{
+	"session not found",
+	"no such session",
+	"no such thread",
+	"thread not found",
+	"no conversation found",
+	"conversation not found",
+	"does not exist",
+	"no checkpoint",
+	"invalid resume",
+	"corrupt", // corrupt session file / corrupt checkpoint
+	"unknown session",
+	"unknown thread",
+}
+
+// IsResumeNotFound reports whether stderr indicates a resume failed
+// because the session is missing/corrupt (vs a transient or auth
+// error). Callers use it to decide whether to degrade to a fresh
+// session (true) or surface/retry the error as-is (false). Matched
+// case-insensitively as a substring.
+func IsResumeNotFound(stderr string) bool {
+	lower := strings.ToLower(stderr)
+	for _, sig := range resumeNotFoundSignals {
+		if strings.Contains(lower, sig) {
+			return true
+		}
+	}
+	return false
+}
+
 // scanBufBytes is the line buffer cap for ScanJSONLines. CLI stream
 // events can carry large embedded payloads (full tool results, spilled
 // file contents), so the default 64K bufio limit is not enough.

@@ -121,6 +121,10 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		retryDelay = 2 * time.Second
 	}
 
+	// resumedFresh guards the resume-not-found → fresh-session fallback
+	// to a single attempt, so a fresh run that also reports not-found
+	// can't loop forever.
+	resumedFresh := false
 	for attempt := 0; ; attempt++ {
 		if ctx.Err() != nil {
 			return bridle.ProviderResult{}, ctx.Err()
@@ -138,6 +142,28 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		// error retry. The second attempt (sessionIsNew=false) bypasses
 		// the transient retry loop to avoid infinite nesting.
 		if req.Session.ID != "" && sessionIsNew && isSessionIDInUseErr(err) {
+			req.Session.New = false
+			continue
+		}
+
+		// Session-resume-not-found (NEX-588): a continuing turn asked to
+		// --resume a session claude-code can't find (missing/corrupt
+		// jsonl). The prior context is unrecoverable, so degrade to a
+		// FRESH session (drop the id, --session-id won't be passed)
+		// rather than hard-failing the turn — with a logged warning so
+		// the lost context is visible. Only on a genuine not-found
+		// signal: auth/rate/network/crash fall through to the normal
+		// retry/propagate paths so a transient blip doesn't silently
+		// drop a builder's session. resumeOnce guards against looping if
+		// the fresh attempt itself somehow reports not-found.
+		if req.Session.ID != "" && !sessionIsNew && !resumedFresh && subprocess.IsResumeNotFound(err.Error()) {
+			sink.Emit(bridle.TurnError{
+				Err: fmt.Errorf("claudecode: resume of session %q failed (missing/corrupt) — falling back to a fresh session; prior context is lost: %w",
+					req.Session.ID, err),
+				Stage: bridle.TurnErrorStageResumeFallback,
+			})
+			resumedFresh = true
+			req.Session.ID = ""
 			req.Session.New = false
 			continue
 		}
@@ -242,11 +268,17 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 		presult, parseErr = parseStream(stdoutPipe, sink)
 	}()
 
+	// Drain stdout to EOF BEFORE cmd.Wait(). StdoutPipe's contract is
+	// that Wait closes the pipe FD on process exit; reaping while the
+	// scan goroutine is still reading races the close and can surface a
+	// spurious "file already closed" or, on a fast exit, drop unread
+	// lines (including the terminal result event). Waiting for streamDone
+	// first lets the goroutine reach a clean EOF before we reap.
 	startTime := time.Now()
+	<-streamDone
 	waitErr := cmd.Wait()
 	runtime := time.Since(startTime)
 	close(procExited) // signal the cancel watcher that the process is gone
-	<-streamDone
 
 	result := presult.ProviderResult
 	stderrStr := stderr.String()
@@ -751,12 +783,21 @@ var errorPatterns = []subprocess.Pattern{
 // Matches errorPatterns in order; falls back to a generic
 // subprocess-error ProviderError when no pattern matches.
 func classifyProviderError(stderr string, waitErr error) *bridle.ProviderError {
-	if kind, msg, ok := subprocess.Classify(stderr, errorPatterns); ok {
+	// claude-code's own patterns first, then the shared cross-provider
+	// table (NEX-588) so bare HTTP codes / signals (401, 429, segfault)
+	// still classify even when claude-code prints no friendly string.
+	if kind, msg, ok := subprocess.ClassifyWithFallback(stderr, "claude-code", errorPatterns); ok {
 		return &bridle.ProviderError{Kind: kind, Message: msg, Err: waitErr}
+	}
+	msg := "claude-code: subprocess exited with error"
+	if s := strings.TrimSpace(stderr); s != "" {
+		// Keep stderr in the message so downstream checks (resume-not-found
+		// fallback) and operators see the real cause, not a bare exit code.
+		msg += " (stderr: " + s + ")"
 	}
 	return &bridle.ProviderError{
 		Kind:    bridle.ProviderErrorSubprocessExit,
-		Message: "claude-code: subprocess exited with error",
+		Message: msg,
 		Err:     waitErr,
 	}
 }
