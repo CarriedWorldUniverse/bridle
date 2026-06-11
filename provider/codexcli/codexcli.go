@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -89,7 +90,40 @@ func (p *Provider) Capabilities() bridle.ProviderCapabilities {
 // RunTurn invokes the Codex CLI and streams its output as bridle events.
 // Tool calls are executed by Codex; bridle's ToolRunner is not called.
 // Cancellation via ctx sends SIGTERM then SIGKILL after a 5s grace period.
+//
+// Session-resume robustness (NEX-588): when a continuing turn resumes a
+// session (`codex exec resume <id>`) and codex reports the thread is
+// missing/corrupt, the turn degrades to a FRESH session (drop the
+// resume, re-run) with a logged TurnErrorStageResumeFallback warning
+// rather than failing the turn. The fresh attempt's content is what the
+// caller gets — the lost prior context is unrecoverable anyway. A
+// transient/auth resume error is NOT treated this way: it propagates so
+// it can be retried against the same session (a builder mid-task must
+// not silently lose context).
 func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink bridle.EventSink) (bridle.ProviderResult, error) {
+	resuming := req.Session.ID != "" && !req.Session.New
+	result, err := p.runTurnOnce(ctx, req, sink)
+	if err == nil || !resuming || ctx.Err() != nil {
+		return result, err
+	}
+	// Only degrade to fresh when the resume genuinely failed because the
+	// session is missing/corrupt — never on auth/rate/network/crash,
+	// which must surface as-is so they can be retried/diagnosed.
+	var pe *bridle.ProviderError
+	if !errors.As(err, &pe) || !subprocess.IsResumeNotFound(pe.Error()) {
+		return result, err
+	}
+	sink.Emit(bridle.TurnError{
+		Err: fmt.Errorf("codexcli: resume of session %q failed (missing/corrupt) — falling back to a fresh session; prior context is lost: %w",
+			req.Session.ID, err),
+		Stage: bridle.TurnErrorStageResumeFallback,
+	})
+	fresh := req
+	fresh.Session.New = true
+	return p.runTurnOnce(ctx, fresh, sink)
+}
+
+func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, sink bridle.EventSink) (bridle.ProviderResult, error) {
 	codexPath := p.CodexPath
 	if codexPath == "" {
 		codexPath = "codex"
@@ -131,9 +165,16 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		result, parseErr = parseStream(stdoutPipe, sink)
 	}()
 
+	// Drain the stdout pipe to EOF BEFORE cmd.Wait(). StdoutPipe's
+	// contract is that Wait closes the pipe FD once the process exits;
+	// calling Wait while the scan goroutine is still reading races the
+	// FD close and can surface a spurious "file already closed" (and, on
+	// a fast exit, drop unread lines — including the terminal result
+	// event). Waiting for streamDone first lets the goroutine read to a
+	// clean EOF (the process closing stdout on exit) before we reap.
+	<-streamDone
 	waitErr := cmd.Wait()
 	close(procExited)
-	<-streamDone
 
 	stderrStr := stderr.String()
 	if waitErr != nil && parseErr == nil {
@@ -517,12 +558,24 @@ var errorPatterns = []subprocess.Pattern{
 }
 
 func classifyProviderError(stderr string, waitErr error) *bridle.ProviderError {
-	if kind, msg, ok := subprocess.Classify(stderr, errorPatterns); ok {
+	// codexcli's own patterns first (CLI-accurate wording), then the
+	// shared actionable table. The shared layer is why a codex 401
+	// (expired auth.json / wrong endpoint) — which codex surfaces as a
+	// bare "exit status 1" with only "401"/"unauthorized" in stderr —
+	// now classifies as AUTH instead of the opaque subprocess-exit that
+	// forced manual in-pod debugging (NEX-588).
+	if kind, msg, ok := subprocess.ClassifyWithFallback(stderr, "codexcli", errorPatterns); ok {
 		return &bridle.ProviderError{Kind: kind, Message: msg, Err: waitErr}
+	}
+	msg := "codexcli: subprocess exited with error"
+	if s := strings.TrimSpace(stderr); s != "" {
+		// Keep stderr in the message so downstream checks (resume-not-found
+		// fallback) and operators see the real cause, not a bare exit code.
+		msg += " (stderr: " + s + ")"
 	}
 	return &bridle.ProviderError{
 		Kind:    bridle.ProviderErrorSubprocessExit,
-		Message: "codexcli: subprocess exited with error",
+		Message: msg,
 		Err:     waitErr,
 	}
 }

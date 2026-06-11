@@ -27,6 +27,7 @@ import (
 	"time"
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
+	"github.com/CarriedWorldUniverse/bridle/internal/subprocess"
 )
 
 const providerID = bridle.ProviderAntigravityCLI
@@ -115,16 +116,25 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		result, parseErr = capturePlainText(stdoutPipe, sink)
 	}()
 
+	// Drain stdout to EOF BEFORE cmd.Wait(). StdoutPipe's contract is
+	// that Wait closes the pipe FD on process exit; reaping while
+	// capturePlainText is still reading races the close and can surface a
+	// spurious "file already closed" or drop output on a fast exit.
+	<-captureDone
 	waitErr := cmd.Wait()
 	close(procExited) // signal the cancel watcher that the process is gone
-	<-captureDone
 
 	if waitErr != nil && parseErr == nil {
 		if ctx.Err() != nil {
 			result.StopReason = bridle.StopReasonAborted
 		} else {
-			sink.Emit(bridle.TurnError{Err: fmt.Errorf("antigravitycli: %w", waitErr), Stage: bridle.TurnErrorStageSubprocessExit})
-			return bridle.ProviderResult{}, fmt.Errorf("antigravitycli: agy error: %w (stderr: %s)", waitErr, stderr.String())
+			// Classify into an actionable kind (auth/rate/network/config/
+			// crash) via the shared table (NEX-588). agy's plain-text
+			// mode gives no structured error stream, so the shared classes
+			// matched against stderr are the only signal.
+			pe := classifyProviderError(stderr.String(), waitErr)
+			sink.Emit(bridle.TurnError{Err: pe, Stage: bridle.TurnErrorStage(pe.Kind)})
+			return bridle.ProviderResult{}, pe
 		}
 	}
 
@@ -172,6 +182,22 @@ func stripLeadingStaleConversationWarnings(text string) (string, bool) {
 		i++
 	}
 	return strings.Join(lines[i:], ""), removed
+}
+
+// classifyProviderError maps agy's stderr to an actionable
+// ProviderError kind via the shared cross-provider table (NEX-588).
+// agy has no structured error output and no CLI-specific pattern list,
+// so the shared classes (auth/rate/network/config/crash) carry it.
+// Falls back to a generic subprocess-exit kind when nothing matches.
+func classifyProviderError(stderr string, waitErr error) *bridle.ProviderError {
+	if kind, msg, ok := subprocess.ClassifyWithFallback(stderr, "antigravitycli", nil); ok {
+		return &bridle.ProviderError{Kind: kind, Message: msg, Err: waitErr}
+	}
+	return &bridle.ProviderError{
+		Kind:    bridle.ProviderErrorSubprocessExit,
+		Message: "antigravitycli: agy exited with error (stderr: " + strings.TrimSpace(stderr) + ")",
+		Err:     waitErr,
+	}
 }
 
 // buildPrompt assembles the messages into a single prompt string for the CLI.
@@ -227,6 +253,14 @@ func (p *Provider) buildCLIArgs(req bridle.ProviderRequest) []string {
 		// dropping cross-turn memory. In a single-agent home (one agy user
 		// per pod), "most recent" IS this aspect's thread, so -c restores
 		// continuity without needing the id at all.
+		//
+		// Resume robustness (NEX-588): this provider is ALREADY resume-safe
+		// by construction. -c can't reference a missing id, and when agy has
+		// no conversation to continue it prints the "conversation not found"
+		// warning and proceeds fresh on its own — capturePlainText strips
+		// that warning (and nils the SessionDelta) so a missing session
+		// degrades to fresh without a turn failure. No fallback wrapper is
+		// needed here, unlike codex/claude/gemini which resume by explicit id.
 		args = append(args, "-c")
 	}
 

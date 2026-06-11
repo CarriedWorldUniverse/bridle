@@ -99,6 +99,12 @@ const (
 	// TurnErrorStageStreamTruncated — the provider's event stream
 	// ended without a terminal result event.
 	TurnErrorStageStreamTruncated TurnErrorStage = "stream_truncated"
+	// TurnErrorStageResumeFallback — a session resume failed because the
+	// referenced session was missing/corrupt, and the provider fell back
+	// to a fresh session. Informational/warning, not terminal: the turn
+	// proceeds without the prior session's context. Distinct from
+	// TurnErrorStageRetry (same session, transient error).
+	TurnErrorStageResumeFallback TurnErrorStage = "resume_fallback"
 )
 
 // ProviderErrorKind classifies a provider-level error so callers can
@@ -112,6 +118,17 @@ const (
 	ProviderErrorNetworkError ProviderErrorKind = "network_error"
 	ProviderErrorTimeout      ProviderErrorKind = "timeout"
 	ProviderErrorTLSError     ProviderErrorKind = "tls_error"
+	// ProviderErrorConfig is a non-transient setup failure: the CLI
+	// binary is missing from PATH, a referenced config file/profile is
+	// absent, or a required flag/argument is malformed. Retrying is
+	// futile — the fix is operator configuration, not a re-run.
+	ProviderErrorConfig ProviderErrorKind = "config_error"
+	// ProviderErrorCrash is an abnormal subprocess termination distinct
+	// from an orderly non-zero exit: a fatal signal (segfault/abort), an
+	// out-of-memory kill, or a panic/stack-overflow in the CLI itself.
+	// Surfaced separately so operators can tell "the model API rejected
+	// us" (auth/rate) from "the CLI process itself died".
+	ProviderErrorCrash ProviderErrorKind = "subprocess_crash"
 	// ProviderErrorSubprocessExit is the fallback kind used when a
 	// subprocess-style provider exited non-zero and no other
 	// classification matched. Callers can filter for this via

@@ -199,3 +199,27 @@ func TestRoundTripLive(t *testing.T) {
 		t.Fatalf("FinalText = %q, want PONG", result.FinalText)
 	}
 }
+
+func TestClassifyProviderError_ActionableClasses(t *testing.T) {
+	waitErr := &exec.ExitError{}
+	cases := []struct {
+		name     string
+		stderr   string
+		wantKind bridle.ProviderErrorKind
+	}{
+		{"401 auth", "Error: 401 Unauthorized", bridle.ProviderErrorAuthFailed},
+		{"429 rate", "429 too many requests", bridle.ProviderErrorRateLimit},
+		{"network", "connection refused", bridle.ProviderErrorNetworkError},
+		{"missing binary", `exec: "agy": executable file not found in $PATH`, bridle.ProviderErrorConfig},
+		{"crash", "out of memory", bridle.ProviderErrorCrash},
+		{"unmatched -> generic", "mysterious agy failure", bridle.ProviderErrorSubprocessExit},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pe := classifyProviderError(tc.stderr, waitErr)
+			if pe.Kind != tc.wantKind {
+				t.Errorf("Kind = %q, want %q", pe.Kind, tc.wantKind)
+			}
+		})
+	}
+}
