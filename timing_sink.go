@@ -83,6 +83,9 @@ func stampEvent(ev Event, ts time.Time) Event {
 	case ToolCallRepaired:
 		e.TS = ts
 		return e
+	case ContextBudgetWarning:
+		e.TS = ts
+		return e
 	default:
 		return ev
 	}

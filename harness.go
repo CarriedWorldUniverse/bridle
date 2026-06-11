@@ -216,6 +216,14 @@ type TurnRequest struct {
 	// credential store wires this from aspects.default_*_credential
 	// per task #218.
 	ProviderEnv map[string]string
+
+	// ContextPolicy is the per-aspect context-window policy (the context
+	// contract, NEX-581): a desired window (TargetWindow) and a soft
+	// prompt-size budget (PromptBudget), expressed once here and mapped
+	// by each provider to its engine knob — or warned on engine-
+	// agnostically. Zero value = no policy (engine defaults, no budget
+	// warning). See ContextPolicy.
+	ContextPolicy ContextPolicy
 }
 
 // TurnResult is the structured outcome of a completed turn.

@@ -36,6 +36,10 @@ type Step struct {
 type Provider struct {
 	steps []Step
 	pos   int
+	// lastReq records the most recent ProviderRequest RunTurn received,
+	// so tests can assert on what the harness lowered (e.g. that the
+	// context policy threaded through). See LastRequest.
+	lastReq bridle.ProviderRequest
 }
 
 // NewProvider returns a fake provider that will replay the given steps.
@@ -57,6 +61,7 @@ func (p *Provider) Capabilities() bridle.ProviderCapabilities {
 
 // RunTurn pops the next scripted step and emits its events to sink.
 func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink bridle.EventSink) (bridle.ProviderResult, error) {
+	p.lastReq = req
 	if p.pos >= len(p.steps) {
 		return bridle.ProviderResult{StopReason: bridle.StopReasonModelDone}, nil
 	}
@@ -104,6 +109,12 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		Usage:         step.Usage,
 		SessionDelta:  delta,
 	}, nil
+}
+
+// LastRequest returns the ProviderRequest from the most recent RunTurn
+// call. Zero value before the first call.
+func (p *Provider) LastRequest() bridle.ProviderRequest {
+	return p.lastReq
 }
 
 // StepsRemaining returns how many scripted steps have not yet been consumed.
