@@ -78,6 +78,12 @@ type ProviderRequest struct {
 	// the per-aspect knob from the lowered request. Providers themselves
 	// ignore it — the contract lives in run.go's round loop.
 	ToolCallStrictness ToolCallStrictness
+	// ContextPolicy is the lowered per-aspect context-window policy (the
+	// context contract, NEX-581). Providers read ContextPolicy.TargetWindow
+	// and map it to their engine knob in applyContextPolicy (ollama →
+	// num_ctx); fixed-window providers no-op it. PromptBudget is enforced
+	// at the harness seam, not here. Zero value = no policy.
+	ContextPolicy ContextPolicy
 }
 
 // ResponseFormat constrains the model's output shape (NEX-299 Pass 2).

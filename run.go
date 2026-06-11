@@ -100,6 +100,21 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 			ToolDefCount: len(preq.Tools),
 		})
 
+		// Context contract (NEX-581), PromptBudget lever: engine-agnostic
+		// budget check on the assembled prompt, in TOKEN terms (reusing
+		// the usage contract's estimator). v1 is warn-only — emit a
+		// ContextBudgetWarning when the estimate meets/exceeds the policy
+		// budget; never truncate or hard-fail. Zero PromptBudget = no check.
+		if req.ContextPolicy.PromptBudget > 0 {
+			assembled := estimateTokens(promptText(preq))
+			if assembled >= req.ContextPolicy.PromptBudget {
+				sink.Emit(ContextBudgetWarning{
+					Assembled: assembled,
+					Budget:    req.ContextPolicy.PromptBudget,
+				})
+			}
+		}
+
 		// Run the provider turn. The timing of this round lands in the
 		// RoundTiming entry appended above (round = last entry).
 		presult, err := h.runProviderRound(ctx, preq, sink, ssink, now, &timing.Rounds[len(timing.Rounds)-1])
@@ -661,6 +676,11 @@ func lowerRequest(req TurnRequest) ProviderRequest {
 		// NEX-581: per-aspect tool-call contract strictness flows to the
 		// harness's post-provider repair/retry step.
 		ToolCallStrictness: req.ToolCallStrictness,
+		// Context contract (NEX-581): the per-aspect context-window
+		// policy flows to the provider, which maps TargetWindow to its
+		// engine knob (ollama num_ctx) or no-ops it (fixed-window APIs).
+		// PromptBudget is enforced at the harness seam below, not here.
+		ContextPolicy: req.ContextPolicy,
 	}
 }
 

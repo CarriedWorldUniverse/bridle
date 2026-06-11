@@ -94,9 +94,7 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 	for k, v := range p.Options {
 		options[k] = v
 	}
-	if p.NumCtx > 0 {
-		options["num_ctx"] = p.NumCtx
-	}
+	applyContextPolicy(options, req.ContextPolicy, p.NumCtx)
 
 	ka := p.KeepAlive
 	if ka == 0 {
@@ -143,6 +141,26 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 	// model's full reply.
 	finalResp.Message.Content = accumulatedTx.String()
 	return extractResult(finalResp), nil
+}
+
+// applyContextPolicy maps bridle's context contract (NEX-581) to
+// ollama's engine knob: options.num_ctx. The per-request
+// policy.TargetWindow wins when set; otherwise the static
+// Provider.NumCtx holds; otherwise num_ctx is omitted entirely so the
+// model default is in effect. PromptBudget is engine-agnostic and
+// enforced at the harness seam, so it has no effect here.
+//
+// The chosen num_ctx is written into options (overwriting any num_ctx a
+// caller passed via Provider.Options — the explicit window policy wins
+// over a passthrough option, matching the documented NumCtx precedence).
+func applyContextPolicy(options map[string]any, policy bridle.ContextPolicy, staticNumCtx int) {
+	numCtx := staticNumCtx
+	if policy.TargetWindow > 0 {
+		numCtx = policy.TargetWindow
+	}
+	if numCtx > 0 {
+		options["num_ctx"] = numCtx
+	}
 }
 
 func extractResult(resp api.ChatResponse) bridle.ProviderResult {

@@ -62,6 +62,86 @@ func runTurn(t *testing.T, p *ollama.Provider) {
 	}
 }
 
+// runTurnWithPolicy runs one turn carrying a ContextPolicy, so the
+// num_ctx mapping (the context contract, NEX-581) can be asserted on
+// the wire.
+func runTurnWithPolicy(t *testing.T, p *ollama.Provider, policy bridle.ContextPolicy) {
+	t.Helper()
+	_, err := p.RunTurn(context.Background(), bridle.ProviderRequest{
+		Model:         "test-model",
+		Messages:      []bridle.ProviderMessage{{Role: "user", Content: "hi"}},
+		ContextPolicy: policy,
+	}, nullSink{})
+	if err != nil {
+		t.Fatalf("RunTurn against fake ollama endpoint: %v", err)
+	}
+}
+
+// TestRunTurn_ContextPolicySetsNumCtx pins the context contract: a
+// per-request ContextPolicy.TargetWindow maps to options.num_ctx on the
+// ollama wire.
+func TestRunTurn_ContextPolicySetsNumCtx(t *testing.T) {
+	h := &capturingChatHandler{}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	p := ollama.NewWithURL(srv.URL)
+	runTurnWithPolicy(t, p, bridle.ContextPolicy{TargetWindow: 16384})
+
+	body := h.body(t)
+	opts, ok := body["options"].(map[string]any)
+	if !ok {
+		t.Fatalf("options is %#v, want a JSON object", body["options"])
+	}
+	if got, want := opts["num_ctx"], float64(16384); got != want {
+		t.Errorf("options.num_ctx = %#v, want %v (from ContextPolicy.TargetWindow)", got, want)
+	}
+}
+
+// TestRunTurn_ContextPolicyOverridesStaticNumCtx pins precedence: a
+// per-request ContextPolicy.TargetWindow overrides the static
+// Provider.NumCtx when both are set.
+func TestRunTurn_ContextPolicyOverridesStaticNumCtx(t *testing.T) {
+	h := &capturingChatHandler{}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	p := ollama.NewWithURL(srv.URL)
+	p.NumCtx = 8192
+	runTurnWithPolicy(t, p, bridle.ContextPolicy{TargetWindow: 16384})
+
+	body := h.body(t)
+	opts, ok := body["options"].(map[string]any)
+	if !ok {
+		t.Fatalf("options is %#v, want a JSON object", body["options"])
+	}
+	if got, want := opts["num_ctx"], float64(16384); got != want {
+		t.Errorf("options.num_ctx = %#v, want %v (request policy must win over static NumCtx)", got, want)
+	}
+}
+
+// TestRunTurn_NoContextPolicyKeepsStaticNumCtx pins that a zero policy
+// leaves the static Provider.NumCtx in effect — current behaviour
+// preserved.
+func TestRunTurn_NoContextPolicyKeepsStaticNumCtx(t *testing.T) {
+	h := &capturingChatHandler{}
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	p := ollama.NewWithURL(srv.URL)
+	p.NumCtx = 8192
+	runTurnWithPolicy(t, p, bridle.ContextPolicy{}) // zero policy
+
+	body := h.body(t)
+	opts, ok := body["options"].(map[string]any)
+	if !ok {
+		t.Fatalf("options is %#v, want a JSON object", body["options"])
+	}
+	if got, want := opts["num_ctx"], float64(8192); got != want {
+		t.Errorf("options.num_ctx = %#v, want %v (static NumCtx when no policy)", got, want)
+	}
+}
+
 // TestRunTurn_OptionsPassthrough pins the wire shape when the operator
 // sets KeepAlive, NumCtx, and model options: keep_alive serializes via
 // api.Duration.MarshalJSON as the Go duration string ("45m0s"), and
