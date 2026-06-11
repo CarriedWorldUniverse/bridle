@@ -21,6 +21,13 @@ type Provider struct {
 	client  *openai.Client
 	apiKey  string
 	baseURL string
+
+	// forceDeepSeek overrides host-based DeepSeek detection. Test seam
+	// only — lets internal wire tests exercise the DeepSeek capability
+	// path against a local httptest server whose host isn't
+	// api.deepseek.com. Production paths leave this false and rely on
+	// isDeepSeekEndpoint(baseURL).
+	forceDeepSeek bool
 }
 
 // New returns an OpenAI provider.
@@ -125,7 +132,7 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		// multi-stop callers, simpler than per-len branching.
 		params.Stop = openai.ChatCompletionNewParamsStopUnion{OfStringArray: req.StopSequences}
 	}
-	if rf := toOpenAIResponseFormat(req.ResponseFormat); rf != nil {
+	if rf := p.responseFormatFor(req.ResponseFormat); rf != nil {
 		params.ResponseFormat = *rf
 	}
 	if tc := toOpenAIToolChoice(req.ToolChoice); tc != nil {
@@ -166,6 +173,14 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		}
 	}
 	if err := stream.Err(); err != nil {
+		// NEX-587: classify the API error so callers can distinguish
+		// rate-limit / auth / server failures (the funnel's retry+backoff
+		// keys off ProviderErrorRateLimit). Non-API errors (context
+		// cancel, dial failure) classify as nil and fall through to the
+		// generic wrap.
+		if pe := classifyOpenAIError(err); pe != nil {
+			return bridle.ProviderResult{}, pe
+		}
 		return bridle.ProviderResult{}, fmt.Errorf("openai: API error: %w", err)
 	}
 
