@@ -380,12 +380,37 @@ func TestBuildCLIArgs_SystemPromptInline(t *testing.T) {
 	}
 }
 
-func TestBuildCLIArgs_SystemPromptSpill(t *testing.T) {
+func TestBuildCLIArgs_SystemPromptReplace(t *testing.T) {
 	p := New()
-	// Build a body that exceeds the spill threshold.
+	req := bridle.ProviderRequest{
+		AppendSystemPrompt: "You are a skilled Go developer.",
+		SystemPromptMode:   bridle.SystemPromptReplace,
+	}
+
+	args, spillFile, err := p.buildCLIArgs(req, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if spillFile != "" {
+		t.Errorf("short system prompt in replace mode should be inlined")
+	}
+
+	inlineIdx := indexOf(args, "--system-prompt")
+	fileIdx := indexOf(args, "--system-prompt-file")
+	if inlineIdx < 0 || args[inlineIdx+1] != "You are a skilled Go developer." {
+		t.Error("--system-prompt should be present for short prompt in replace mode")
+	}
+	if fileIdx >= 0 {
+		t.Error("--system-prompt-file should not be present for short prompt in replace mode")
+	}
+}
+
+func TestBuildCLIArgs_SystemPromptReplaceSpill(t *testing.T) {
+	p := New()
 	big := strings.Repeat("x", systemPromptSpillThresholdBytes+1)
 	req := bridle.ProviderRequest{
 		AppendSystemPrompt: big,
+		SystemPromptMode:   bridle.SystemPromptReplace,
 	}
 
 	args, spillFile, err := p.buildCLIArgs(req, false)
@@ -393,16 +418,41 @@ func TestBuildCLIArgs_SystemPromptSpill(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if spillFile == "" {
-		t.Error("large system prompt should spill to tempfile")
+		t.Error("large system prompt in replace mode should spill to tempfile")
+	}
+
+	inlineIdx := indexOf(args, "--system-prompt")
+	fileIdx := indexOf(args, "--system-prompt-file")
+	if inlineIdx >= 0 {
+		t.Error("--system-prompt should NOT be present for large prompt in replace mode")
+	}
+	if fileIdx < 0 {
+		t.Error("--system-prompt-file should be present for large prompt in replace mode")
+	}
+}
+
+func TestBuildCLIArgs_DefaultAppendMode(t *testing.T) {
+	p := New()
+	req := bridle.ProviderRequest{
+		AppendSystemPrompt: "You are a helpful assistant.",
+		// SystemPromptMode unspecified (zero value) = append.
+	}
+
+	args, spillFile, err := p.buildCLIArgs(req, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if spillFile != "" {
+		t.Errorf("short system prompt in default mode should be inlined")
 	}
 
 	inlineIdx := indexOf(args, "--append-system-prompt")
 	fileIdx := indexOf(args, "--append-system-prompt-file")
-	if inlineIdx >= 0 {
-		t.Error("--append-system-prompt should NOT be present for large prompt")
+	if inlineIdx < 0 || args[inlineIdx+1] != "You are a helpful assistant." {
+		t.Error("--append-system-prompt should be present for short prompt in default mode")
 	}
-	if fileIdx < 0 {
-		t.Error("--append-system-prompt-file should be present for large prompt")
+	if fileIdx >= 0 {
+		t.Error("--append-system-prompt-file should not be present for short prompt in default mode")
 	}
 }
 

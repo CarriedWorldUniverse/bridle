@@ -84,6 +84,14 @@ type ProviderRequest struct {
 	// num_ctx); fixed-window providers no-op it. PromptBudget is enforced
 	// at the harness seam, not here. Zero value = no policy.
 	ContextPolicy ContextPolicy
+
+	// SystemPromptMode selects how AppendSystemPrompt is applied: replace (replaces the
+	// base prompt entirely, like --system-prompt); or append (the default).
+	//
+	// Default/append mode appends to bridle's built-in base prompt; replace mode replaces it.
+	// Claude-code v2.1.177 supports both modes — `--system-prompt` / `--append-system-prompt`
+	// with the same spill logic as AppendSystemPrompt. Field is zero value (default) = append.
+	SystemPromptMode SystemPromptMode
 }
 
 // ResponseFormat constrains the model's output shape (NEX-299 Pass 2).
