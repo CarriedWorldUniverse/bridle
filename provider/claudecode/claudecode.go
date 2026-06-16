@@ -599,12 +599,22 @@ func (p *Provider) buildCLIArgs(req bridle.ProviderRequest, sessionIsNew bool) (
 	args = []string{"-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions"}
 
 	if req.AppendSystemPrompt != "" {
-		spillArgs, file, perr := appendSystemPromptArgs(req.AppendSystemPrompt)
-		if perr != nil {
-			return nil, "", perr
+		switch req.SystemPromptMode {
+		case bridle.SystemPromptReplace:
+			spillArgs, file, perr := replaceSystemPromptArgs(req.AppendSystemPrompt)
+			if perr != nil {
+				return nil, "", perr
+			}
+			systemPromptFile = file
+			args = append(args, spillArgs...)
+		default: // default/append mode (zero value is append); branch for readability.
+			spillArgs, file, perr := appendSystemPromptArgs(req.AppendSystemPrompt)
+			if perr != nil {
+				return nil, "", perr
+			}
+			systemPromptFile = file
+			args = append(args, spillArgs...)
 		}
-		systemPromptFile = file
-		args = append(args, spillArgs...)
 	}
 
 	if p.Bare {
