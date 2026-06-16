@@ -654,6 +654,7 @@ func lowerRequest(req TurnRequest) ProviderRequest {
 	return ProviderRequest{
 		AspectID:           req.AspectID,
 		AppendSystemPrompt: req.AppendSystemPrompt,
+		SystemPromptMode:   req.SystemPromptMode,
 		Session:            req.Session,
 		Messages:           messages,
 		Tools:              req.Tools,

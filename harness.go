@@ -121,6 +121,7 @@ type TurnRequest struct {
 	// Identity & framing
 	AspectID           string         // who's running (cost/triage/identity attribution)
 	AppendSystemPrompt string         // composed by funnel: NEXUS.md + SOUL.md + PRIMER + harness rules
+	SystemPromptMode   SystemPromptMode // how AppendSystemPrompt is applied: append (default, zero value) extends claude-code's base prompt; replace swaps it entirely
 	Session            SessionHandle  // opaque handle for provider-side state (subprocess-stream: resume key)
 	SessionTail        []SessionEvent // recent events for direct-api providers to lower into the request
 
