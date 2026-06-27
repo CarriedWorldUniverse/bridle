@@ -535,6 +535,93 @@ func TestLive_OpenAI_DeepSeekReasonerToolRoundtrip(t *testing.T) {
 	}
 }
 
+// TestLive_OpenAI_DeepSeekReasonerSendChatChunking — diagnostic for
+// the plumb pathology: aspect emits one send_chat per word of its
+// reply, fanning a single intended message into dozens of chat rows.
+// The unit-level streaming tests showed bridle's accumulator merges
+// chunk deltas correctly. This test asks the actual model the same
+// question — given plumb-shaped prompt + the real send_chat tool
+// schema, does DeepSeek-v4-pro emit 1 tool_call or N?
+//
+// Asserts ToolCalls == 1. Failure with N>1 means the model itself
+// is parallel-emitting; failure with N==0 means the model bypassed
+// the tool. Either way the test surface gives the actual count for
+// diagnosis.
+//
+// The system prompt mirrors plumb's SOUL.md style guidance ("loose,
+// sketchy, write the way someone thinks aloud") because that's the
+// instruction most likely to interact badly with parallel_tool_calls.
+// The send_chat schema is verbatim from nexus/frame/funnel/comms.go.
+func TestLive_OpenAI_DeepSeekReasonerSendChatChunking(t *testing.T) {
+	key := getenv("DEEPSEEK_REASONER_KEY", "DEEPSEEK_OPENAI_API_KEY")
+	if key == "" {
+		t.Skip("DEEPSEEK_REASONER_KEY (or DEEPSEEK_OPENAI_API_KEY) not set; skipping live chunking diagnostic")
+	}
+	model := getenv("DEEPSEEK_REASONER_MODEL", "")
+	if model == "" {
+		model = "deepseek-reasoner"
+	}
+	p := openai.NewWithBaseURL(key, "https://api.deepseek.com/v1")
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+	h := bridle.NewHarness(p)
+
+	// Plumb-shaped system prompt (loose style + reply via chat tool).
+	// Lifted from the relevant SOUL/PRIMER beats so the model sees
+	// the same shape of guidance the real aspect does.
+	systemPrompt := `You are plumb, an aspect of Convergence in a multi-agent network.
+
+## Style
+Loose. Sketchy. Comfortable being wrong on the way to right. You write in the way someone thinks aloud — if the operator wants polish, that's a downstream pass.
+
+## Reply mechanism
+You communicate via the send_chat tool. Every reply you make to the operator is via send_chat.`
+
+	// send_chat tool def, verbatim shape from
+	// nexus/frame/funnel/comms.go:218.
+	tools := []bridle.ToolDef{{
+		Name:        "send_chat",
+		Description: "Post a message to the group chat. Use to ask clarifying questions, share status, or reply to an addressed message. Use @<aspect> to mention a specific aspect; replies go to the parent's author plus any explicit @-mentions.",
+		InputSchema: json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"content":  {"type": "string", "description": "Message body. Use @aspect to mention."},
+				"reply_to": {"type": "integer", "description": "Optional msg_id of the message you're replying to."},
+				"topic":    {"type": "string", "description": "Optional topic name for feature-scoped threads."}
+			},
+			"required": ["content"]
+		}`),
+	}}
+
+	result, err := h.RunTurn(ctx, bridle.TurnRequest{
+		Model:              model,
+		AppendSystemPrompt: systemPrompt,
+		// A prompt that should provoke a multi-sentence reply. If
+		// plumb's tendency is to chunk one-per-word, this is where
+		// it surfaces.
+		UserMessage: "Hey plumb — give me your two-sentence take on whether worktrees-by-default is a good idea for agent tasks.",
+		MaxSteps:    1,
+		Tools:       tools,
+	}, noopRunner{}, nullSink{})
+	if err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+
+	// Always log what we got — primary use of this test is observing
+	// model behavior, the assertion is secondary.
+	t.Logf("model emitted %d send_chat tool_call(s) for a single reply prompt:", len(result.ToolCalls))
+	for i, tc := range result.ToolCalls {
+		t.Logf("  [%d] id=%s args=%s", i, tc.ID, string(tc.Args))
+	}
+
+	if len(result.ToolCalls) == 0 {
+		t.Fatalf("model bypassed send_chat entirely — FinalText=%q", result.FinalText)
+	}
+	if len(result.ToolCalls) > 1 {
+		t.Errorf("model emitted %d parallel send_chat calls; want 1 (the per-word chunking pathology). See logged args above to inspect the split.", len(result.ToolCalls))
+	}
+}
+
 func getenv(primary, fallback string) string {
 	if v := os.Getenv(primary); v != "" {
 		return v
