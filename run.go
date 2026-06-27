@@ -4,12 +4,27 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/CarriedWorldUniverse/bridle/internal/mcpclient"
 )
 
 // runTurn is the inner implementation, called by RunTurn after the panic trap.
 func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunner, sink EventSink) (TurnResult, error) {
+	now := h.clock()
+	turnStart := now()
+	var timing TurnTiming
+
+	// Wrap the caller's sink ONCE: every event the harness or the
+	// provider emits from here on is timestamp-stamped, and the
+	// decorator records each round's first-event time for the
+	// startup/stream split. Providers receive the wrapped sink, so
+	// provider-emitted events get stamped for free — zero provider
+	// changes.
+	ssink := &stampSink{inner: sink, now: now}
+	sink = ssink
+
 	// Connect MCP servers and merge tool surface (direct-api providers only).
 	var mcpClient *mcpclient.Client
 	caps := h.provider.Capabilities()
@@ -18,9 +33,19 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 		var err error
 		mcpClient, err = mcpclient.Connect(ctx, specs)
 		if err != nil {
+			// NEX-596: per-server failures no longer hard-fail Connect.
+			// A genuine returned error here is catastrophic — preserve
+			// the StopReasonError path for it.
 			return TurnResult{StopReason: StopReasonError}, err
 		}
 		defer mcpClient.Close()
+
+		// NEX-596: a failing MCP server is skipped, not fatal. Surface
+		// each dropped server for observability and proceed with the
+		// tools from the servers that connected.
+		for _, f := range mcpClient.Failures() {
+			sink.Emit(MCPServerFailed{Server: f.Name, Err: f.Err})
+		}
 
 		mcpTools := mcpClient.Tools()
 		merged, err := mergeToolSurface(req.Tools, mcpTools)
@@ -29,6 +54,9 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 		}
 		req.Tools = merged
 	}
+
+	// Assembly span, round 0: lowerRequest + BeforeModelCall hooks.
+	assemblyStart := now()
 
 	// Lower TurnRequest → ProviderRequest.
 	preq := lowerRequest(req)
@@ -46,6 +74,7 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 	if aborted {
 		return partialAbort(), nil
 	}
+	assemblySecs := now().Sub(assemblyStart).Seconds()
 
 	var (
 		allInvocations []ToolInvocation
@@ -62,9 +91,35 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 			return partialAbortWith(finalText, allInvocations, stepCount, totalUsage), nil
 		}
 
-		// Run the provider turn.
-		presult, err := h.provider.RunTurn(ctx, preq, sink)
+		// One RoundTiming entry per provider call. Request-size fields
+		// reflect the request as the provider receives it (post-hook).
+		timing.Rounds = append(timing.Rounds, RoundTiming{
+			AssemblySecs: assemblySecs,
+			PromptBytes:  promptBytes(preq.Messages),
+			MessageCount: len(preq.Messages),
+			ToolDefCount: len(preq.Tools),
+		})
+
+		// Context contract (NEX-581), PromptBudget lever: engine-agnostic
+		// budget check on the assembled prompt, in TOKEN terms (reusing
+		// the usage contract's estimator). v1 is warn-only — emit a
+		// ContextBudgetWarning when the estimate meets/exceeds the policy
+		// budget; never truncate or hard-fail. Zero PromptBudget = no check.
+		if req.ContextPolicy.PromptBudget > 0 {
+			assembled := estimateTokens(promptText(preq))
+			if assembled >= req.ContextPolicy.PromptBudget {
+				sink.Emit(ContextBudgetWarning{
+					Assembled: assembled,
+					Budget:    req.ContextPolicy.PromptBudget,
+				})
+			}
+		}
+
+		// Run the provider turn. The timing of this round lands in the
+		// RoundTiming entry appended above (round = last entry).
+		presult, err := h.runProviderRound(ctx, preq, sink, ssink, now, &timing.Rounds[len(timing.Rounds)-1])
 		if err != nil {
+			timing.TotalSecs = now().Sub(turnStart).Seconds()
 			sink.Emit(TurnError{Err: err, Stage: TurnErrorStageProvider})
 			return TurnResult{
 				FinalText:  finalText,
@@ -72,6 +127,28 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 				StepCount:  stepCount,
 				Usage:      totalUsage,
 				StopReason: StopReasonError,
+				Timing:     timing,
+			}, err
+		}
+
+		// NEX-581 tool-call contract: after the provider returns, before
+		// tool execution, guarantee a clean tool call or clean text turn.
+		// On a detected leak this repairs structurally and — under the
+		// repair-then-retry strictness — retries the round ONCE. A retry
+		// REPLACES the bad round: the retried presult overwrites this
+		// round's timing entry and we count only the retried usage, never
+		// both (the bad round is discarded, not summed). See enforceToolCallContract.
+		presult, err = h.enforceToolCallContract(ctx, preq, presult, sink, ssink, now, &timing.Rounds[len(timing.Rounds)-1])
+		if err != nil {
+			timing.TotalSecs = now().Sub(turnStart).Seconds()
+			sink.Emit(TurnError{Err: err, Stage: TurnErrorStageProvider})
+			return TurnResult{
+				FinalText:  finalText,
+				ToolCalls:  allInvocations,
+				StepCount:  stepCount,
+				Usage:      totalUsage,
+				StopReason: StopReasonError,
+				Timing:     timing,
 			}, err
 		}
 
@@ -90,7 +167,15 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 			}
 			finalText += presult.FinalText
 		}
-		totalUsage = addUsage(totalUsage, presult.Usage)
+		// Usage contract (NEX-581): normalize the round's usage before
+		// folding it into the turn total. A provider that reported real
+		// counts passes through untouched; one that returned zero gets a
+		// flagged, tokenizer-estimated floor so the turn never reports
+		// silently-zero usage. Engine-agnostic — same gate for every
+		// provider. The estimate is sourced from this round's prompt
+		// (the assembled request) and response (FinalText).
+		roundUsage := normalizeUsage(presult.Usage, promptText(preq), presult.FinalText)
+		totalUsage = addUsage(totalUsage, roundUsage)
 		sessionDelta = append(sessionDelta, presult.SessionDelta...)
 		// Track the most recent non-empty ResolvedModel — last round
 		// wins, so multi-step turns where the model id might shift
@@ -125,13 +210,20 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 		// Execute each tool call.
 		var toolMessages []ProviderMessage
 		for _, inv := range presult.ToolCalls {
+			toolStart := now()
 			toolMsg, completed, abortedExec, execErr := h.executeToolCall(ctx, inv, stepCount, runner, mcpClient, sink)
+			toolSecs := now().Sub(toolStart).Seconds()
 			if execErr != nil {
 				return partialAbortWith(finalText, allInvocations, stepCount, totalUsage), execErr
 			}
 			if abortedExec {
 				return partialAbortWith(finalText, allInvocations, stepCount, totalUsage), nil
 			}
+			timing.Tools = append(timing.Tools, ToolTiming{
+				ID:   completed.ID,
+				Name: completed.Name,
+				Secs: toolSecs,
+			})
 			allInvocations = append(allInvocations, completed)
 			toolMessages = append(toolMessages, toolMsg)
 			sessionDelta = append(sessionDelta, SessionEvent{
@@ -160,6 +252,10 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 			stopReason = StopReasonMaxSteps
 			break
 		}
+
+		// Assembly span, round N: rebuild of the next request (message
+		// appends) + the in-loop BeforeModelCall hooks.
+		assemblyStart = now()
 
 		// Reconstruct the assistant turn that emitted those tool_use blocks
 		// before appending the tool_results. Bedrock (and strict providers)
@@ -201,8 +297,10 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 		if aborted {
 			return partialAbortWith(finalText, allInvocations, stepCount, totalUsage), nil
 		}
+		assemblySecs = now().Sub(assemblyStart).Seconds()
 	}
 
+	timing.TotalSecs = now().Sub(turnStart).Seconds()
 	result := TurnResult{
 		FinalText:     finalText,
 		ToolCalls:     allInvocations,
@@ -211,6 +309,7 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 		StopReason:    stopReason,
 		ResolvedModel: resolvedModel,
 		SessionDelta:  sessionDelta,
+		Timing:        timing,
 	}
 
 	// OnTurnDone hook — may mutate SessionDelta.
@@ -218,6 +317,129 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 	h.hooks.runOnTurnDone(ctx, otd) //nolint:errcheck
 	sink.Emit(TurnDone{Result: result})
 	return result, nil
+}
+
+// runProviderRound runs one provider turn and records its timing into the
+// supplied RoundTiming entry, populating the startup/stream split from the
+// stampSink's first-event mark. Factored out of the round loop so the
+// tool-call contract's retry (NEX-581) can re-run the provider and OVERWRITE
+// the same RoundTiming entry — the retry replaces the bad round, so its
+// timing supersedes rather than adds to the discarded round's.
+func (h *Harness) runProviderRound(
+	ctx context.Context,
+	preq ProviderRequest,
+	sink EventSink,
+	ssink *stampSink,
+	now func() time.Time,
+	round *RoundTiming,
+) (ProviderResult, error) {
+	ssink.roundReset()
+	callStart := now()
+	presult, err := h.provider.RunTurn(ctx, preq, sink)
+	callEnd := now()
+	if first := ssink.takeFirstEvent(); !first.IsZero() {
+		round.StartupToFirstEventSecs = first.Sub(callStart).Seconds()
+		round.StreamSecs = callEnd.Sub(first).Seconds()
+	} else {
+		// The provider emitted no events this round (e.g. a tool-call-only
+		// round from a direct-API provider). There was never a first event
+		// to split on, so attribute the full call duration to startup and
+		// leave StreamSecs 0 — the whole wait was pre-stream latency.
+		round.StartupToFirstEventSecs = callEnd.Sub(callStart).Seconds()
+		round.StreamSecs = 0
+	}
+	return presult, err
+}
+
+// enforceToolCallContract is the post-provider tool-call contract step
+// (NEX-581). After the provider returns and before tool execution, it
+// guarantees the consumer never sees a malformed/leaked tool call:
+//
+//  1. Detect: scan the surfaced text + tool-call args for leaked protocol
+//     tokens (the harmony/channel/<|tool_call|> class the gemma A/B caught)
+//     or a tool-call emitted as literal text.
+//  2. No leak → return presult untouched. The clean-provider path is a
+//     zero-cost passthrough; existing turns are unaffected.
+//  3. Repair: on a leak, attempt a structural repair (strip tokens; extract
+//     a tool-call-as-text into a proper ToolInvocation) WITHOUT a model
+//     round trip. A clean repair is applied to presult and returned.
+//  4. Retry: under repair-then-retry strictness, if repair couldn't recover
+//     a clean result, retry the round ONCE with a tightened system nudge,
+//     reusing runProviderRound so the retried round OVERWRITES this round's
+//     timing entry and its usage REPLACES (is not added to) the bad round's.
+//     The retried result itself runs back through detect→repair so a
+//     second-time leak is still cleaned before surfacing.
+//  5. Surface flagged: when retry is exhausted (or strictness is tolerant),
+//     surface the best-effort repaired result, flagged via a ToolCallRepaired
+//     event.
+//
+// Emits ToolCallRepaired{detected|repaired|retried|flagged} for observability.
+func (h *Harness) enforceToolCallContract(
+	ctx context.Context,
+	preq ProviderRequest,
+	presult ProviderResult,
+	sink EventSink,
+	ssink *stampSink,
+	now func() time.Time,
+	round *RoundTiming,
+) (ProviderResult, error) {
+	hasTools := len(preq.Tools) > 0
+	report := detectLeak(presult, hasTools)
+	if !report.detected {
+		return presult, nil // clean — zero-cost passthrough
+	}
+	sink.Emit(ToolCallRepaired{Stage: toolCallStageDetected, Detail: report.detail})
+
+	repaired := repairLeak(presult, hasTools)
+	if repaired.clean {
+		sink.Emit(ToolCallRepaired{Stage: toolCallStageRepaired, Detail: repaired.detail})
+		return applyRepair(presult, repaired), nil
+	}
+
+	// Repair couldn't fully recover. Under tolerant strictness, accept the
+	// best-effort repaired result without a retry round — surface flagged.
+	if effectiveStrictness(preq.ToolCallStrictness) == ToolCallStrictnessTolerant {
+		sink.Emit(ToolCallRepaired{Stage: toolCallStageFlagged, Detail: repaired.detail})
+		return applyRepair(presult, repaired), nil
+	}
+
+	// Strict: retry the round ONCE with a tightened instruction. The retry
+	// REPLACES the bad round — overwrite this round's timing and use only the
+	// retried usage.
+	retryReq := preq
+	retryReq.AppendSystemPrompt = preq.AppendSystemPrompt + retryNudge
+	sink.Emit(ToolCallRepaired{Stage: toolCallStageRetried, Detail: report.detail})
+
+	retryResult, err := h.runProviderRound(ctx, retryReq, sink, ssink, now, round)
+	if err != nil {
+		return ProviderResult{}, err
+	}
+
+	// Re-run detect→repair on the retried result. Cap at one retry: whatever
+	// the second round produced is what we surface (clean, or flagged).
+	retryReport := detectLeak(retryResult, hasTools)
+	if !retryReport.detected {
+		return retryResult, nil // retry produced a clean turn
+	}
+	sink.Emit(ToolCallRepaired{Stage: toolCallStageDetected, Detail: retryReport.detail})
+	retryRepaired := repairLeak(retryResult, hasTools)
+	stage := toolCallStageRepaired
+	if !retryRepaired.clean {
+		stage = toolCallStageFlagged
+	}
+	sink.Emit(ToolCallRepaired{Stage: stage, Detail: retryRepaired.detail})
+	return applyRepair(retryResult, retryRepaired), nil
+}
+
+// applyRepair folds a repairOutcome back into a ProviderResult, preserving
+// the provider's usage/session/model fields (only the surfaced text and
+// tool calls change). Usage and timing are NOT touched here — a repaired
+// (non-retried) result keeps the original round's usage, since no extra
+// model call was made.
+func applyRepair(res ProviderResult, r repairOutcome) ProviderResult {
+	res.FinalText = r.text
+	res.ToolCalls = r.toolCalls
+	return res
 }
 
 // executeToolCall runs one tool invocation through the BeforeToolCall →
@@ -245,6 +467,50 @@ func (h *Harness) executeToolCall(
 		return
 	}
 	call = btc.Call
+
+	// Per-call deny: a BeforeToolCall hook set Deny=true (returning
+	// HookContinue). Skip runner.Run/MCP entirely, hand the model the
+	// hook-supplied Result/Err as the tool_result, still fire
+	// AfterToolCall (audit), and continue the loop — do NOT abort.
+	// Mirrors the normal-path tcr→toolMsg→completed construction below.
+	if btc.Deny {
+		sink.Emit(ToolCallStart{ID: call.ID, Name: call.Name, Args: call.Args})
+
+		resultJSON := btc.Result
+		if resultJSON == nil {
+			resultJSON = json.RawMessage(`null`)
+		}
+		tcr := ToolCallResult{ID: call.ID, Result: resultJSON, Err: btc.Err}
+		sink.Emit(tcr)
+
+		// AfterToolCall hook — fires on denied calls so observability
+		// sees the refusal.
+		atc := AfterToolCallCtx{Call: call, Result: tcr, Step: stepCount + 1}
+		atc, aborted, err = h.hooks.runAfterToolCall(ctx, atc)
+		if err != nil || aborted {
+			return
+		}
+
+		completed = ToolInvocation{
+			ID:     call.ID,
+			Name:   call.Name,
+			Args:   call.Args,
+			Result: atc.Result.Result,
+			Err:    atc.Result.Err,
+		}
+
+		resultStr := string(atc.Result.Result)
+		if atc.Result.Err != "" {
+			resultStr = fmt.Sprintf("error: %s", atc.Result.Err)
+		}
+		toolMsg = ProviderMessage{
+			Role:       "tool_result",
+			Content:    resultStr,
+			ToolCallID: call.ID,
+			ToolName:   call.Name, // required by Gemini's FunctionResponse contract; ignored by other providers
+		}
+		return
+	}
 
 	sink.Emit(ToolCallStart{ID: call.ID, Name: call.Name, Args: call.Args})
 
@@ -388,6 +654,7 @@ func lowerRequest(req TurnRequest) ProviderRequest {
 	return ProviderRequest{
 		AspectID:           req.AspectID,
 		AppendSystemPrompt: req.AppendSystemPrompt,
+		SystemPromptMode:   req.SystemPromptMode,
 		Session:            req.Session,
 		Messages:           messages,
 		Tools:              req.Tools,
@@ -407,6 +674,14 @@ func lowerRequest(req TurnRequest) ProviderRequest {
 		MaxOutputTokens: req.MaxOutputTokens,
 		StopSequences:   req.StopSequences,
 		ResponseFormat:  req.ResponseFormat,
+		// NEX-581: per-aspect tool-call contract strictness flows to the
+		// harness's post-provider repair/retry step.
+		ToolCallStrictness: req.ToolCallStrictness,
+		// Context contract (NEX-581): the per-aspect context-window
+		// policy flows to the provider, which maps TargetWindow to its
+		// engine knob (ollama num_ctx) or no-ops it (fixed-window APIs).
+		// PromptBudget is enforced at the harness seam below, not here.
+		ContextPolicy: req.ContextPolicy,
 	}
 }
 
@@ -467,6 +742,39 @@ func parseSessionToolCall(e SessionEvent) (ToolInvocation, bool) {
 	return ToolInvocation{}, false
 }
 
+// promptBytes is the marshaled size of the round's request messages —
+// the request-size lens for TurnTiming. Returns -1 on a marshal error
+// (e.g. invalid RawMessage payloads); instrumentation never fails the
+// turn.
+func promptBytes(msgs []ProviderMessage) int {
+	b, err := json.Marshal(msgs)
+	if err != nil {
+		return -1
+	}
+	return len(b)
+}
+
+// promptText concatenates the round's input text — the system prompt
+// plus every message's content — into a single string for the usage
+// estimator (NEX-581). It is an approximation of the input the model
+// received: tool-schema and structural framing aren't counted, but the
+// prose dominates the token count and this is only a last-resort floor
+// for engines that report no usage at all.
+func promptText(req ProviderRequest) string {
+	var b strings.Builder
+	if req.AppendSystemPrompt != "" {
+		b.WriteString(req.AppendSystemPrompt)
+		b.WriteByte('\n')
+	}
+	for _, m := range req.Messages {
+		if m.Content != "" {
+			b.WriteString(m.Content)
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
 func addUsage(a, b Usage) Usage {
 	return Usage{
 		InputTokens:              a.InputTokens + b.InputTokens,
@@ -474,6 +782,10 @@ func addUsage(a, b Usage) Usage {
 		CacheReadInputTokens:     a.CacheReadInputTokens + b.CacheReadInputTokens,
 		CacheCreationInputTokens: a.CacheCreationInputTokens + b.CacheCreationInputTokens,
 		CostUSD:                  a.CostUSD + b.CostUSD,
+		// If ANY round contributed an estimated count, the turn total is
+		// approximate — flag it so cost accounting knows not to trust it
+		// as exact.
+		Estimated: a.Estimated || b.Estimated,
 	}
 }
 

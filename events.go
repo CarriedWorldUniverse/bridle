@@ -3,6 +3,7 @@ package bridle
 import (
 	"encoding/json"
 	"errors"
+	"time"
 )
 
 // Event is the union type for all observable harness events.
@@ -13,6 +14,7 @@ type Event interface {
 // ModelChunk carries a streamed text fragment from the model.
 type ModelChunk struct {
 	Text string
+	TS   time.Time // stamped by the harness at emission; zero outside a harness turn
 }
 
 // ToolCallStart fires when the model requests a tool call, before execution.
@@ -20,24 +22,38 @@ type ToolCallStart struct {
 	ID   string
 	Name string
 	Args json.RawMessage
+	TS   time.Time // stamped by the harness at emission; zero outside a harness turn
 }
 
 // ToolCallResult fires after the tool runner returns (or errors).
 type ToolCallResult struct {
 	ID     string
 	Result json.RawMessage
-	Err    string // non-empty if the tool runner returned an error
+	Err    string    // non-empty if the tool runner returned an error
+	TS     time.Time // stamped by the harness at emission; zero outside a harness turn
 }
 
 // StepBoundary fires between tool-call rounds.
 // Step 1 = the first round; fires after its results are sent back to the model.
 type StepBoundary struct {
 	Step int
+	TS   time.Time // stamped by the harness at emission; zero outside a harness turn
 }
 
 // TurnDone fires after the turn completes successfully.
 type TurnDone struct {
 	Result TurnResult
+	TS     time.Time // stamped by the harness at emission; zero outside a harness turn
+}
+
+// MCPServerFailed fires when an MCP server fails to connect/initialize
+// during turn setup. NEX-596: such a failure is non-fatal — the server's
+// tools are dropped and the turn proceeds with the remaining servers.
+// This event surfaces the dropped server for observability.
+type MCPServerFailed struct {
+	Server string
+	Err    error
+	TS     time.Time // stamped by the harness at emission; zero outside a harness turn
 }
 
 // TurnError fires when the provider or harness hits a non-recoverable
@@ -50,6 +66,7 @@ type TurnDone struct {
 type TurnError struct {
 	Err   error
 	Stage TurnErrorStage
+	TS    time.Time // stamped by the harness at emission; zero outside a harness turn
 }
 
 // TurnErrorStage names a pipeline location that produced a TurnError.
@@ -82,6 +99,12 @@ const (
 	// TurnErrorStageStreamTruncated — the provider's event stream
 	// ended without a terminal result event.
 	TurnErrorStageStreamTruncated TurnErrorStage = "stream_truncated"
+	// TurnErrorStageResumeFallback — a session resume failed because the
+	// referenced session was missing/corrupt, and the provider fell back
+	// to a fresh session. Informational/warning, not terminal: the turn
+	// proceeds without the prior session's context. Distinct from
+	// TurnErrorStageRetry (same session, transient error).
+	TurnErrorStageResumeFallback TurnErrorStage = "resume_fallback"
 )
 
 // ProviderErrorKind classifies a provider-level error so callers can
@@ -89,12 +112,23 @@ const (
 type ProviderErrorKind string
 
 const (
-	ProviderErrorAuthFailed     ProviderErrorKind = "auth_failed"
-	ProviderErrorRateLimit      ProviderErrorKind = "rate_limit"
-	ProviderErrorServerError    ProviderErrorKind = "server_error"
-	ProviderErrorNetworkError   ProviderErrorKind = "network_error"
-	ProviderErrorTimeout        ProviderErrorKind = "timeout"
-	ProviderErrorTLSError       ProviderErrorKind = "tls_error"
+	ProviderErrorAuthFailed   ProviderErrorKind = "auth_failed"
+	ProviderErrorRateLimit    ProviderErrorKind = "rate_limit"
+	ProviderErrorServerError  ProviderErrorKind = "server_error"
+	ProviderErrorNetworkError ProviderErrorKind = "network_error"
+	ProviderErrorTimeout      ProviderErrorKind = "timeout"
+	ProviderErrorTLSError     ProviderErrorKind = "tls_error"
+	// ProviderErrorConfig is a non-transient setup failure: the CLI
+	// binary is missing from PATH, a referenced config file/profile is
+	// absent, or a required flag/argument is malformed. Retrying is
+	// futile — the fix is operator configuration, not a re-run.
+	ProviderErrorConfig ProviderErrorKind = "config_error"
+	// ProviderErrorCrash is an abnormal subprocess termination distinct
+	// from an orderly non-zero exit: a fatal signal (segfault/abort), an
+	// out-of-memory kill, or a panic/stack-overflow in the CLI itself.
+	// Surfaced separately so operators can tell "the model API rejected
+	// us" (auth/rate) from "the CLI process itself died".
+	ProviderErrorCrash ProviderErrorKind = "subprocess_crash"
 	// ProviderErrorSubprocessExit is the fallback kind used when a
 	// subprocess-style provider exited non-zero and no other
 	// classification matched. Callers can filter for this via
@@ -129,9 +163,10 @@ func IsProviderErrorKind(err error, kind ProviderErrorKind) bool {
 	return false
 }
 
-func (ModelChunk) event()     {}
-func (ToolCallStart) event()  {}
-func (ToolCallResult) event() {}
-func (StepBoundary) event()   {}
-func (TurnDone) event()       {}
-func (TurnError) event()      {}
+func (ModelChunk) event()      {}
+func (ToolCallStart) event()   {}
+func (ToolCallResult) event()  {}
+func (StepBoundary) event()    {}
+func (TurnDone) event()        {}
+func (TurnError) event()       {}
+func (MCPServerFailed) event() {}

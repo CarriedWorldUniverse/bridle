@@ -13,7 +13,6 @@
 package claudecode
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -29,6 +28,7 @@ import (
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
 	"github.com/CarriedWorldUniverse/bridle/internal/normalize"
+	"github.com/CarriedWorldUniverse/bridle/internal/subprocess"
 )
 
 const providerID = bridle.ProviderClaudeCode
@@ -121,6 +121,10 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		retryDelay = 2 * time.Second
 	}
 
+	// resumedFresh guards the resume-not-found → fresh-session fallback
+	// to a single attempt, so a fresh run that also reports not-found
+	// can't loop forever.
+	resumedFresh := false
 	for attempt := 0; ; attempt++ {
 		if ctx.Err() != nil {
 			return bridle.ProviderResult{}, ctx.Err()
@@ -138,6 +142,28 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		// error retry. The second attempt (sessionIsNew=false) bypasses
 		// the transient retry loop to avoid infinite nesting.
 		if req.Session.ID != "" && sessionIsNew && isSessionIDInUseErr(err) {
+			req.Session.New = false
+			continue
+		}
+
+		// Session-resume-not-found (NEX-588): a continuing turn asked to
+		// --resume a session claude-code can't find (missing/corrupt
+		// jsonl). The prior context is unrecoverable, so degrade to a
+		// FRESH session (drop the id, --session-id won't be passed)
+		// rather than hard-failing the turn — with a logged warning so
+		// the lost context is visible. Only on a genuine not-found
+		// signal: auth/rate/network/crash fall through to the normal
+		// retry/propagate paths so a transient blip doesn't silently
+		// drop a builder's session. resumeOnce guards against looping if
+		// the fresh attempt itself somehow reports not-found.
+		if req.Session.ID != "" && !sessionIsNew && !resumedFresh && subprocess.IsResumeNotFound(err.Error()) {
+			sink.Emit(bridle.TurnError{
+				Err: fmt.Errorf("claudecode: resume of session %q failed (missing/corrupt) — falling back to a fresh session; prior context is lost: %w",
+					req.Session.ID, err),
+				Stage: bridle.TurnErrorStageResumeFallback,
+			})
+			resumedFresh = true
+			req.Session.ID = ""
 			req.Session.New = false
 			continue
 		}
@@ -215,7 +241,7 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 	// (PATH, HOME, etc.) keeps working. Empty/nil = no overlay; the
 	// subprocess inherits the bridle host's env unchanged.
 	if len(req.ProviderEnv) > 0 {
-		cmd.Env = mergeEnv(os.Environ(), req.ProviderEnv)
+		cmd.Env = subprocess.MergeEnv(os.Environ(), req.ProviderEnv)
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -228,32 +254,11 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 		return bridle.ProviderResult{}, fmt.Errorf("claudecode: start: %w", err)
 	}
 
-	// Cancel watcher: SIGTERM + grace period + SIGKILL.
-	//
-	// procExited is closed AFTER cmd.Wait() returns (see below). The
-	// watcher waits on either ctx cancellation OR the process exiting
-	// naturally; on cancellation it sends SIGTERM and waits up to the
-	// grace period for procExited before SIGKILLing. Without procExited
-	// being closed externally, the watcher would (a) leak on natural
-	// exit and (b) always SIGKILL after the full grace period even when
-	// the process already responded to SIGTERM.
+	// Cancel watcher: SIGTERM + grace period + SIGKILL. procExited is
+	// closed AFTER cmd.Wait() returns (see below); see
+	// subprocess.WatchCancel for the full contract.
 	procExited := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = cmd.Process.Signal(sigterm())
-			timer := time.NewTimer(5 * time.Second)
-			defer timer.Stop()
-			select {
-			case <-timer.C:
-				_ = cmd.Process.Kill()
-			case <-procExited:
-				// Process exited cleanly during grace period — no SIGKILL needed.
-			}
-		case <-procExited:
-			// Natural exit — nothing to do.
-		}
-	}()
+	go subprocess.WatchCancel(ctx, cmd, procExited, subprocess.TermSignal())
 
 	streamDone := make(chan struct{})
 	var presult parseResult
@@ -263,11 +268,17 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 		presult, parseErr = parseStream(stdoutPipe, sink)
 	}()
 
+	// Drain stdout to EOF BEFORE cmd.Wait(). StdoutPipe's contract is
+	// that Wait closes the pipe FD on process exit; reaping while the
+	// scan goroutine is still reading races the close and can surface a
+	// spurious "file already closed" or, on a fast exit, drop unread
+	// lines (including the terminal result event). Waiting for streamDone
+	// first lets the goroutine reach a clean EOF before we reap.
 	startTime := time.Now()
+	<-streamDone
 	waitErr := cmd.Wait()
 	runtime := time.Since(startTime)
 	close(procExited) // signal the cancel watcher that the process is gone
-	<-streamDone
 
 	result := presult.ProviderResult
 	stderrStr := stderr.String()
@@ -380,17 +391,10 @@ func parseStream(r io.Reader, sink bridle.EventSink) (parseResult, error) {
 
 	pendingCalls := map[string]bridle.ToolCallStart{}
 
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-
+	perLine := func(line []byte) {
 		var event map[string]json.RawMessage
 		if jsonErr := json.Unmarshal(line, &event); jsonErr != nil {
-			continue // malformed line — skip, don't fail the turn
+			return // malformed line — skip, don't fail the turn
 		}
 
 		var eventType string
@@ -552,7 +556,7 @@ func parseStream(r io.Reader, sink bridle.EventSink) (parseResult, error) {
 		}
 	}
 
-	if err := scanner.Err(); err != nil && err != io.EOF {
+	if err := subprocess.ScanJSONLines(r, perLine); err != nil {
 		return parseResult{}, fmt.Errorf("claudecode: stream read: %w", err)
 	}
 
@@ -591,16 +595,26 @@ func parseStream(r io.Reader, sink bridle.EventSink) (parseResult, error) {
 // Extracted from runTurnOnce so the allowed-tools / MCP interaction is
 // testable without spawning a subprocess.
 func (p *Provider) buildCLIArgs(req bridle.ProviderRequest, sessionIsNew bool) (args []string, systemPromptFile string, err error) {
-	prompt := buildPrompt(req)
+	prompt := subprocess.LastUserPrompt(req.Messages)
 	args = []string{"-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions"}
 
 	if req.AppendSystemPrompt != "" {
-		spillArgs, file, perr := appendSystemPromptArgs(req.AppendSystemPrompt)
-		if perr != nil {
-			return nil, "", perr
+		switch req.SystemPromptMode {
+		case bridle.SystemPromptReplace:
+			spillArgs, file, perr := replaceSystemPromptArgs(req.AppendSystemPrompt)
+			if perr != nil {
+				return nil, "", perr
+			}
+			systemPromptFile = file
+			args = append(args, spillArgs...)
+		default: // default/append mode (zero value is append); branch for readability.
+			spillArgs, file, perr := appendSystemPromptArgs(req.AppendSystemPrompt)
+			if perr != nil {
+				return nil, "", perr
+			}
+			systemPromptFile = file
+			args = append(args, spillArgs...)
 		}
-		systemPromptFile = file
-		args = append(args, spillArgs...)
 	}
 
 	if p.Bare {
@@ -696,60 +710,6 @@ func appendSystemPromptArgs(body string) ([]string, string, error) {
 	return []string{"--append-system-prompt-file", f.Name()}, f.Name(), nil
 }
 
-// buildPrompt returns the current turn's user message for the CLI's -p arg.
-//
-// Returns ONLY the most recent user message — not the full SessionTail. The
-// claude-code subprocess gets prior conversation history from the session
-// jsonl on --resume <id>, not from argv. Folding SessionTail into -p here
-// would (a) duplicate the history the subprocess is already loading from
-// disk and (b) blow Windows CreateProcess's 32K argv budget once a session
-// accumulates state. Observed 2026-05-13: keel as Frame (global context)
-// crossed 32K after a few turns and every spawn failed with the misleading
-// "filename or extension is too long" kernel error.
-//
-// Direct-API providers (claude-api etc.) need history reassembled because
-// they have no subprocess-owned jsonl — they use toClaudeMessages() in
-// their own provider package, not this function. buildPrompt is
-// claudecode-exclusive by design.
-//
-// See task #216 for full diagnosis.
-func buildPrompt(req bridle.ProviderRequest) string {
-	for i := len(req.Messages) - 1; i >= 0; i-- {
-		if req.Messages[i].Role == "user" {
-			return req.Messages[i].Content
-		}
-	}
-	return ""
-}
-
-// mergeEnv overlays the per-turn key=value map onto the parent
-// process's env. Per-turn keys take precedence; any KEY=VALUE pair in
-// `base` whose KEY is in `overlay` is replaced. Both inputs are left
-// unmodified.
-func mergeEnv(base []string, overlay map[string]string) []string {
-	if len(overlay) == 0 {
-		return base
-	}
-	// Index base by KEY for O(1) replacement.
-	idx := make(map[string]int, len(base))
-	out := make([]string, len(base))
-	copy(out, base)
-	for i, kv := range out {
-		if eq := strings.IndexByte(kv, '='); eq > 0 {
-			idx[kv[:eq]] = i
-		}
-	}
-	for k, v := range overlay {
-		entry := k + "=" + v
-		if i, ok := idx[k]; ok {
-			out[i] = entry
-		} else {
-			out = append(out, entry)
-		}
-	}
-	return out
-}
-
 // isAPIError reports whether an event carries a CLI-level API error marker.
 // claude-code sets is_api_error=true (snake_case) or isApiErrorMessage=true
 // (camelCase) when the model API returns an error.
@@ -785,82 +745,69 @@ func isRetryable(err error) bool {
 	return false
 }
 
-// classificationPattern maps a set of case-insensitive substring
-// patterns to a bridle.ProviderError classification. Order matters:
-// classifyProviderError iterates errorPatterns top-to-bottom and
-// returns the first match. Auth comes before the generic "exit" path,
-// network before timeout (timeout often co-occurs with network errors
-// but the network signal is more actionable), and so on.
-//
-// Patterns are matched against the CLI's stderr (lowercased). They're
-// mostly stable API error codes ("authentication_failed",
-// "rate_limit_error", "overloaded_error") that surface either as plain
-// text or embedded in stream-json error events; a few are network
-// shell errors ("connection refused", etc.).
-type classificationPattern struct {
-	kind     bridle.ProviderErrorKind
-	patterns []string
-	message  string
-}
-
-var errorPatterns = []classificationPattern{
+// errorPatterns is claudecode's ordered stderr classification table.
+// Auth comes before the generic "exit" path, network before timeout
+// (timeout often co-occurs with network errors but the network signal
+// is more actionable), and so on. See subprocess.Pattern for matching
+// semantics.
+var errorPatterns = []subprocess.Pattern{
 	{
 		// Auth failures — the dominant case. claude-code writes the
 		// synthetic "Not logged in. Please run /login." response to
 		// stderr + exits 1 when ANTHROPIC_API_KEY is missing/unset/
 		// expired.
-		kind:     bridle.ProviderErrorAuthFailed,
-		patterns: []string{"not logged in", "authentication_failed", "run /login"},
-		message:  "claude-code: authentication failed — aspect not authenticated to provider. Check ANTHROPIC_API_KEY or run /login",
+		Kind:     bridle.ProviderErrorAuthFailed,
+		Patterns: []string{"not logged in", "authentication_failed", "run /login"},
+		Message:  "claude-code: authentication failed — aspect not authenticated to provider. Check ANTHROPIC_API_KEY or run /login",
 	},
 	{
-		kind:     bridle.ProviderErrorRateLimit,
-		patterns: []string{"rate_limit", "rate limited"},
-		message:  "claude-code: rate limited — provider throttled the request",
+		Kind:     bridle.ProviderErrorRateLimit,
+		Patterns: []string{"rate_limit", "rate limited"},
+		Message:  "claude-code: rate limited — provider throttled the request",
 	},
 	{
-		kind:     bridle.ProviderErrorServerError,
-		patterns: []string{"server_error", "internal server error", "overloaded"},
-		message:  "claude-code: provider server error — the API returned an internal error",
+		Kind:     bridle.ProviderErrorServerError,
+		Patterns: []string{"server_error", "internal server error", "overloaded"},
+		Message:  "claude-code: provider server error — the API returned an internal error",
 	},
 	{
-		kind:     bridle.ProviderErrorNetworkError,
-		patterns: []string{"connection refused", "no route to host", "connection reset", "eof"},
-		message:  "claude-code: network error connecting to provider",
+		Kind:     bridle.ProviderErrorNetworkError,
+		Patterns: []string{"connection refused", "no route to host", "connection reset", "eof"},
+		Message:  "claude-code: network error connecting to provider",
 	},
 	{
-		kind:     bridle.ProviderErrorTimeout,
-		patterns: []string{"timeout", "deadline exceeded", "timed out"},
-		message:  "claude-code: request timed out",
+		Kind:     bridle.ProviderErrorTimeout,
+		Patterns: []string{"timeout", "deadline exceeded", "timed out"},
+		Message:  "claude-code: request timed out",
 	},
 	{
-		kind:     bridle.ProviderErrorTLSError,
-		patterns: []string{"certificate", "ssl", "tls"},
-		message:  "claude-code: TLS error connecting to provider",
+		Kind:     bridle.ProviderErrorTLSError,
+		Patterns: []string{"certificate", "ssl", "tls"},
+		Message:  "claude-code: TLS error connecting to provider",
 	},
 }
 
 // classifyProviderError inspects the CLI's stderr and classifies the
 // subprocess error into a bridle.ProviderError so the activity log
 // surfaces a distinct diagnosis string instead of an opaque exit code.
-// Iterates errorPatterns and returns the first match; falls back to a
-// generic subprocess-error ProviderError when no pattern matches.
+// Matches errorPatterns in order; falls back to a generic
+// subprocess-error ProviderError when no pattern matches.
 func classifyProviderError(stderr string, waitErr error) *bridle.ProviderError {
-	lower := strings.ToLower(stderr)
-	for _, cp := range errorPatterns {
-		for _, sub := range cp.patterns {
-			if strings.Contains(lower, sub) {
-				return &bridle.ProviderError{
-					Kind:    cp.kind,
-					Message: cp.message,
-					Err:     waitErr,
-				}
-			}
-		}
+	// claude-code's own patterns first, then the shared cross-provider
+	// table (NEX-588) so bare HTTP codes / signals (401, 429, segfault)
+	// still classify even when claude-code prints no friendly string.
+	if kind, msg, ok := subprocess.ClassifyWithFallback(stderr, "claude-code", errorPatterns); ok {
+		return &bridle.ProviderError{Kind: kind, Message: msg, Err: waitErr}
+	}
+	msg := "claude-code: subprocess exited with error"
+	if s := strings.TrimSpace(stderr); s != "" {
+		// Keep stderr in the message so downstream checks (resume-not-found
+		// fallback) and operators see the real cause, not a bare exit code.
+		msg += " (stderr: " + s + ")"
 	}
 	return &bridle.ProviderError{
 		Kind:    bridle.ProviderErrorSubprocessExit,
-		Message: "claude-code: subprocess exited with error",
+		Message: msg,
 		Err:     waitErr,
 	}
 }

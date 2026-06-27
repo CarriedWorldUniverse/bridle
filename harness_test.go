@@ -664,6 +664,8 @@ func assertEventOrder(t *testing.T, events []bridle.Event, types ...string) {
 			got = append(got, "TurnDone")
 		case bridle.TurnError:
 			got = append(got, "TurnError")
+		case bridle.ToolCallRepaired:
+			got = append(got, "ToolCallRepaired")
 		}
 	}
 	if len(got) != len(types) {
@@ -717,6 +719,57 @@ func TestRunTurn_MCPNoServers(t *testing.T) {
 	}
 	if result.FinalText != "hello" {
 		t.Errorf("want 'hello', got %q", result.FinalText)
+	}
+}
+
+// TestRunTurn_MCPServerFailure_DoesNotWedgeTurn pins NEX-596: a single
+// failing MCP server must not fail the whole turn. The failed server is
+// skipped, its tools dropped, the turn proceeds, and an MCPServerFailed
+// event is emitted for observability.
+func TestRunTurn_MCPServerFailure_DoesNotWedgeTurn(t *testing.T) {
+	p := fake.NewProvider(fake.Step{Text: "hello", StopReason: bridle.StopReasonModelDone})
+	h := bridle.NewHarness(p)
+	sink := &fake.SliceEventSink{}
+
+	req := bridle.TurnRequest{
+		Model: "fake-model",
+		Tools: []bridle.ToolDef{toolDef("explicit_tool")},
+		MCP: &bridle.MCPClientConfig{
+			Servers: []bridle.MCPServerSpec{{
+				Name:      "nexus-jira",
+				Transport: bridle.MCPTransportStdio,
+				Command:   []string{"this-binary-does-not-exist-nex596"},
+			}},
+		},
+	}
+	result, err := h.RunTurn(context.Background(), req, fake.NewToolRunner(nil), sink)
+	if err != nil {
+		t.Fatalf("turn should complete despite MCP server failure, got: %v", err)
+	}
+	if result.StopReason != bridle.StopReasonModelDone {
+		t.Errorf("StopReason = %q; want model_done (turn proceeded)", result.StopReason)
+	}
+	if result.FinalText != "hello" {
+		t.Errorf("FinalText = %q; want hello", result.FinalText)
+	}
+
+	var failed *bridle.MCPServerFailed
+	for _, e := range sink.Events {
+		if f, ok := e.(bridle.MCPServerFailed); ok {
+			failed = &f
+		}
+	}
+	if failed == nil {
+		t.Fatal("MCPServerFailed event not emitted")
+	}
+	if failed.Server != "nexus-jira" {
+		t.Errorf("MCPServerFailed.Server = %q; want nexus-jira", failed.Server)
+	}
+	if failed.Err == nil {
+		t.Error("MCPServerFailed.Err is nil; want the underlying connect error")
+	}
+	if failed.TS.IsZero() {
+		t.Error("MCPServerFailed.TS is zero; want stamped by the harness")
 	}
 }
 

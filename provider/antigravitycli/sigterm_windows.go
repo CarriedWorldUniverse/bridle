@@ -1,6 +1,6 @@
 //go:build windows
 
-package geminicli
+package antigravitycli
 
 import "os"
 

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/ollama/ollama/api"
 
@@ -17,10 +18,26 @@ import (
 
 const defaultBaseURL = "http://localhost:11434"
 
+// defaultKeepAlive holds gemma-class models loaded across quiet
+// periods: ollama's server-side default unloads after ~5 idle minutes,
+// which makes an always-on aspect (keel) pay a full model reload on
+// the first turn after every lull.
+const defaultKeepAlive = 30 * time.Minute
+
 // Provider implements bridle.Provider for a local Ollama server.
 type Provider struct {
 	client  *api.Client
 	baseURL string
+
+	// KeepAlive controls how long the server keeps the model loaded
+	// after a request. 0 means the 30m default (keel is always-on).
+	KeepAlive time.Duration
+	// NumCtx sets the context window (options.num_ctx). 0 means omit,
+	// leaving the model default in effect.
+	NumCtx int
+	// Options is merged into ChatRequest.Options on every turn;
+	// NumCtx wins on conflict. The map itself is never mutated.
+	Options map[string]any
 }
 
 // New returns an Ollama provider pointing at the default localhost:11434.
@@ -73,13 +90,25 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 	messages := toOllamaMessages(req.Messages)
 	tools := toOllamaTools(req.Tools)
 
+	options := make(map[string]any, len(p.Options)+1)
+	for k, v := range p.Options {
+		options[k] = v
+	}
+	applyContextPolicy(options, req.ContextPolicy, p.NumCtx)
+
+	ka := p.KeepAlive
+	if ka == 0 {
+		ka = defaultKeepAlive
+	}
+
 	stream := true
 	chatReq := &api.ChatRequest{
-		Model:    req.Model,
-		Messages: messages,
-		Tools:    tools,
-		Stream:   &stream,
-		Options:  map[string]any{},
+		Model:     req.Model,
+		Messages:  messages,
+		Tools:     tools,
+		Stream:    &stream,
+		Options:   options,
+		KeepAlive: &api.Duration{Duration: ka},
 	}
 	if req.AppendSystemPrompt != "" {
 		chatReq.Messages = append([]api.Message{
@@ -112,6 +141,26 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 	// model's full reply.
 	finalResp.Message.Content = accumulatedTx.String()
 	return extractResult(finalResp), nil
+}
+
+// applyContextPolicy maps bridle's context contract (NEX-581) to
+// ollama's engine knob: options.num_ctx. The per-request
+// policy.TargetWindow wins when set; otherwise the static
+// Provider.NumCtx holds; otherwise num_ctx is omitted entirely so the
+// model default is in effect. PromptBudget is engine-agnostic and
+// enforced at the harness seam, so it has no effect here.
+//
+// The chosen num_ctx is written into options (overwriting any num_ctx a
+// caller passed via Provider.Options — the explicit window policy wins
+// over a passthrough option, matching the documented NumCtx precedence).
+func applyContextPolicy(options map[string]any, policy bridle.ContextPolicy, staticNumCtx int) {
+	numCtx := staticNumCtx
+	if policy.TargetWindow > 0 {
+		numCtx = policy.TargetWindow
+	}
+	if numCtx > 0 {
+		options["num_ctx"] = numCtx
+	}
 }
 
 func extractResult(resp api.ChatResponse) bridle.ProviderResult {

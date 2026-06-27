@@ -72,6 +72,26 @@ type ProviderRequest struct {
 	MaxOutputTokens int
 	StopSequences   []string
 	ResponseFormat  *ResponseFormat
+
+	// ToolCallStrictness mirrors TurnRequest.ToolCallStrictness so the
+	// harness's post-provider tool-call contract step (NEX-581) can read
+	// the per-aspect knob from the lowered request. Providers themselves
+	// ignore it — the contract lives in run.go's round loop.
+	ToolCallStrictness ToolCallStrictness
+	// ContextPolicy is the lowered per-aspect context-window policy (the
+	// context contract, NEX-581). Providers read ContextPolicy.TargetWindow
+	// and map it to their engine knob in applyContextPolicy (ollama →
+	// num_ctx); fixed-window providers no-op it. PromptBudget is enforced
+	// at the harness seam, not here. Zero value = no policy.
+	ContextPolicy ContextPolicy
+
+	// SystemPromptMode selects how AppendSystemPrompt is applied: replace (replaces the
+	// base prompt entirely, like --system-prompt); or append (the default).
+	//
+	// Default/append mode appends to bridle's built-in base prompt; replace mode replaces it.
+	// Claude-code v2.1.177 supports both modes — `--system-prompt` / `--append-system-prompt`
+	// with the same spill logic as AppendSystemPrompt. Field is zero value (default) = append.
+	SystemPromptMode SystemPromptMode
 }
 
 // ResponseFormat constrains the model's output shape (NEX-299 Pass 2).

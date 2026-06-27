@@ -16,17 +16,17 @@
 package geminicli
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
 	"strings"
-	"time"
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
+	"github.com/CarriedWorldUniverse/bridle/internal/subprocess"
 )
 
 const providerID = bridle.ProviderGeminiCLI
@@ -68,7 +68,35 @@ func (p *Provider) Capabilities() bridle.ProviderCapabilities {
 // RunTurn invokes the gemini CLI and streams its output as bridle events.
 // Tool calls are executed by the CLI; bridle's ToolRunner is not called.
 // Cancellation via ctx sends SIGTERM then SIGKILL after a 5s grace period.
+//
+// Session-resume robustness (NEX-588): gemini's --resume takes "latest"
+// or a numeric index; a stale/out-of-range index makes the CLI exit
+// non-zero. When a resume fails because the checkpoint is missing, the
+// turn degrades to a FRESH session (drop --resume, re-run) with a
+// logged TurnErrorStageResumeFallback warning rather than failing. Only
+// on a genuine not-found signal — auth/rate/network/crash surface
+// as-is.
 func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink bridle.EventSink) (bridle.ProviderResult, error) {
+	resuming := req.Session.ID != ""
+	result, err := p.runTurnOnce(ctx, req, sink)
+	if err == nil || !resuming || ctx.Err() != nil {
+		return result, err
+	}
+	var pe *bridle.ProviderError
+	if !errors.As(err, &pe) || !subprocess.IsResumeNotFound(pe.Error()) {
+		return result, err
+	}
+	sink.Emit(bridle.TurnError{
+		Err: fmt.Errorf("geminicli: resume of session %q failed (missing/corrupt) — falling back to a fresh session; prior context is lost: %w",
+			req.Session.ID, err),
+		Stage: bridle.TurnErrorStageResumeFallback,
+	})
+	fresh := req
+	fresh.Session.ID = ""
+	return p.runTurnOnce(ctx, fresh, sink)
+}
+
+func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, sink bridle.EventSink) (bridle.ProviderResult, error) {
 	geminiPath := p.GeminiPath
 	if geminiPath == "" {
 		geminiPath = "gemini"
@@ -131,32 +159,11 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		return bridle.ProviderResult{}, fmt.Errorf("geminicli: start: %w", err)
 	}
 
-	// Cancel watcher: SIGTERM + grace period + SIGKILL.
-	//
-	// procExited is closed AFTER cmd.Wait() returns. The watcher waits
-	// on either ctx cancellation OR the process exiting naturally; on
-	// cancellation it sends SIGTERM and waits up to the grace period
-	// for procExited before SIGKILLing. Without procExited being closed
-	// externally, the watcher would (a) leak on natural exit and (b)
-	// always SIGKILL after the full grace period even when the process
-	// already responded to SIGTERM.
+	// Cancel watcher: SIGTERM + grace period + SIGKILL. procExited is
+	// closed AFTER cmd.Wait() returns; see subprocess.WatchCancel for
+	// the full contract.
 	procExited := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = cmd.Process.Signal(sigterm())
-			timer := time.NewTimer(5 * time.Second)
-			defer timer.Stop()
-			select {
-			case <-timer.C:
-				_ = cmd.Process.Kill()
-			case <-procExited:
-				// Process exited cleanly during grace period — no SIGKILL needed.
-			}
-		case <-procExited:
-			// Natural exit — nothing to do.
-		}
-	}()
+	go subprocess.WatchCancel(ctx, cmd, procExited, subprocess.TermSignal())
 
 	streamDone := make(chan struct{})
 	var result bridle.ProviderResult
@@ -166,16 +173,27 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		result, parseErr = parseStream(stdoutPipe, sink)
 	}()
 
+	// Drain stdout to EOF BEFORE cmd.Wait(). StdoutPipe's contract is
+	// that Wait closes the pipe FD on process exit; reaping while the
+	// scan goroutine is still reading races the close and can surface a
+	// spurious "file already closed" or, on a fast exit, drop unread
+	// lines (including the terminal result event).
+	<-streamDone
 	waitErr := cmd.Wait()
 	close(procExited) // signal the cancel watcher that the process is gone
-	<-streamDone
 
 	if waitErr != nil && parseErr == nil {
 		if ctx.Err() != nil {
 			result.StopReason = bridle.StopReasonAborted
 		} else {
-			sink.Emit(bridle.TurnError{Err: fmt.Errorf("geminicli: %w", waitErr), Stage: bridle.TurnErrorStageSubprocessExit})
-			return bridle.ProviderResult{}, fmt.Errorf("geminicli: CLI error: %w (stderr: %s)", waitErr, stderr.String())
+			// Classify the failure into an actionable kind (auth/rate/
+			// network/config/crash) so the funnel logs WHAT to do rather
+			// than a bare exit code (NEX-588). geminicli has no
+			// CLI-specific pattern table; it relies entirely on the
+			// shared classes.
+			pe := classifyProviderError(stderr.String(), waitErr)
+			sink.Emit(bridle.TurnError{Err: pe, Stage: bridle.TurnErrorStage(pe.Kind)})
+			return bridle.ProviderResult{}, pe
 		}
 	}
 
@@ -190,11 +208,12 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 // parseStream reads stream-json lines and maps them to bridle events + result.
 //
 // Event shapes (observed from gemini CLI v0.x stream-json output):
-//   {"type":"init", "session_id":"<uuid>", "model":"<id>"}
-//   {"type":"message", "role":"user|assistant", "content":"...", "delta":true?}
-//   {"type":"tool_use", "tool_name":"...", "tool_id":"...", "parameters":{...}}
-//   {"type":"tool_result", "tool_id":"...", "status":"success|..."}
-//   {"type":"result", "status":"success|...", "stats":{"input_tokens":..,"output_tokens":..,"tool_calls":..}}
+//
+//	{"type":"init", "session_id":"<uuid>", "model":"<id>"}
+//	{"type":"message", "role":"user|assistant", "content":"...", "delta":true?}
+//	{"type":"tool_use", "tool_name":"...", "tool_id":"...", "parameters":{...}}
+//	{"type":"tool_result", "tool_id":"...", "status":"success|..."}
+//	{"type":"result", "status":"success|...", "stats":{"input_tokens":..,"output_tokens":..,"tool_calls":..}}
 func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, error) {
 	var (
 		finalText    string
@@ -208,21 +227,18 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 
 	pendingCalls := map[string]bridle.ToolCallStart{}
 
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 || line[0] != '{' {
+	perLine := func(line []byte) {
+		if line[0] != '{' {
 			// CLI prints free-form banners ("YOLO mode is enabled.", etc.) on stdout.
 			// Skip anything that isn't a JSON object.
-			continue
+			return
 		}
 
 		var head struct {
 			Type string `json:"type"`
 		}
 		if err := json.Unmarshal(line, &head); err != nil {
-			continue
+			return
 		}
 
 		switch head.Type {
@@ -332,7 +348,7 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 		}
 	}
 
-	if err := scanner.Err(); err != nil && err != io.EOF {
+	if err := subprocess.ScanJSONLines(r, perLine); err != nil {
 		return bridle.ProviderResult{}, fmt.Errorf("geminicli: stream read: %w", err)
 	}
 
@@ -354,6 +370,23 @@ func parseStream(r io.Reader, sink bridle.EventSink) (bridle.ProviderResult, err
 		StopReason:   stopReason,
 		SessionDelta: sessionDelta,
 	}, nil
+}
+
+// classifyProviderError maps gemini's stderr to an actionable
+// ProviderError kind via the shared cross-provider table (NEX-588).
+// gemini-cli emits no consistent CLI-worded error strings of its own,
+// so there is no provider-specific pattern list — the shared classes
+// (auth/rate/network/config/crash) carry it. Falls back to a generic
+// subprocess-exit kind when nothing matches.
+func classifyProviderError(stderr string, waitErr error) *bridle.ProviderError {
+	if kind, msg, ok := subprocess.ClassifyWithFallback(stderr, "geminicli", nil); ok {
+		return &bridle.ProviderError{Kind: kind, Message: msg, Err: waitErr}
+	}
+	return &bridle.ProviderError{
+		Kind:    bridle.ProviderErrorSubprocessExit,
+		Message: "geminicli: subprocess exited with error (stderr: " + strings.TrimSpace(stderr) + ")",
+		Err:     waitErr,
+	}
 }
 
 // buildPrompt assembles the messages into a single prompt string for the CLI.

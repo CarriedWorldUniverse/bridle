@@ -249,6 +249,58 @@ func TestLive_OpenAI_JSONObjectResponseFormat(t *testing.T) {
 	}
 }
 
+// TestLive_DeepSeek_StrictDegradesToJSONObject (NEX-587) verifies the
+// strict-mode degradation end-to-end against the REAL DeepSeek /v1: a
+// caller requesting response_format=json_schema strict (which DeepSeek
+// rejects with 400 "type unavailable") gets a clean parseable-JSON
+// result because the DeepSeek-aware provider degraded the request to
+// json_object on the wire — NOT a hard 400. This is the exact
+// regression the NEX-297 L2 A/B caught; here we assert the fix holds
+// against the live endpoint.
+//
+// Env-gated on DEEPSEEK_OPENAI_API_KEY; skips cleanly without it.
+func TestLive_DeepSeek_StrictDegradesToJSONObject(t *testing.T) {
+	key := os.Getenv("DEEPSEEK_OPENAI_API_KEY")
+	if key == "" {
+		t.Skip("DEEPSEEK_OPENAI_API_KEY not set; skipping live DeepSeek strict-degrade test")
+	}
+	p := openai.NewWithBaseURL(key, "https://api.deepseek.com/v1")
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	temp := 0.0
+	h := bridle.NewHarness(p)
+	result, err := h.RunTurn(ctx, bridle.TurnRequest{
+		Model:           "deepseek-chat",
+		UserMessage:     `Classify this turn as scratch or complete: hello world. Reply with JSON {"class":"...","reason":"..."}.`,
+		MaxSteps:        1,
+		Temperature:     &temp,
+		MaxOutputTokens: 150,
+		// Request STRICT json_schema — DeepSeek would 400 this raw; the
+		// provider must degrade it to json_object so this succeeds.
+		ResponseFormat: &bridle.ResponseFormat{
+			Type:   "json_schema",
+			Name:   "judge_verdict",
+			Strict: true,
+			Schema: json.RawMessage(`{
+				"type": "object",
+				"additionalProperties": false,
+				"properties": {
+					"class":  {"type": "string", "enum": ["complete", "scratch"]},
+					"reason": {"type": "string"}
+				},
+				"required": ["class", "reason"]
+			}`),
+		},
+	}, noopRunner{}, nullSink{})
+	if err != nil {
+		t.Fatalf("strict request against DeepSeek must NOT 400 (should degrade to json_object): %v", err)
+	}
+	var anyJSON map[string]any
+	if jerr := json.Unmarshal([]byte(strings.TrimSpace(result.FinalText)), &anyJSON); jerr != nil {
+		t.Errorf("degraded json_object response did not parse as JSON: %v\nbody=%s", jerr, result.FinalText)
+	}
+}
+
 func TestLive_OpenAI_AuthFails(t *testing.T) {
 	if os.Getenv("OPENAI_API_KEY") == "" {
 		t.Skip("OPENAI_API_KEY not set; skipping")

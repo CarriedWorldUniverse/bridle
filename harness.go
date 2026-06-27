@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 )
 
 // ErrModelRequired is returned by RunTurn when TurnRequest.Model is empty.
@@ -13,14 +14,16 @@ var ErrModelRequired = errors.New("bridle: TurnRequest.Model is required")
 type ProviderID string
 
 const (
-	ProviderClaude     ProviderID = "claude-api"
-	ProviderClaudeCode ProviderID = "claude-code"
-	ProviderClaudePty  ProviderID = "claude-pty"
-	ProviderOllama     ProviderID = "ollama-local"
-	ProviderOpenAI     ProviderID = "openai-api"
-	ProviderBedrock    ProviderID = "bedrock"
-	ProviderGemini     ProviderID = "gemini-api"
-	ProviderGeminiCLI  ProviderID = "gemini-cli"
+	ProviderClaude         ProviderID = "claude-api"
+	ProviderClaudeCode     ProviderID = "claude-code"
+	ProviderClaudePty      ProviderID = "claude-pty"
+	ProviderOllama         ProviderID = "ollama-local"
+	ProviderOpenAI         ProviderID = "openai-api"
+	ProviderBedrock        ProviderID = "bedrock"
+	ProviderGemini         ProviderID = "gemini-api"
+	ProviderGeminiCLI      ProviderID = "gemini-cli"
+	ProviderCodexCLI       ProviderID = "codex-cli"
+	ProviderAntigravityCLI ProviderID = "antigravity-cli"
 )
 
 // StopReason explains why a turn ended.
@@ -59,6 +62,17 @@ type Usage struct {
 	CacheReadInputTokens     int     // Anthropic prompt-cache hit count
 	CacheCreationInputTokens int     // tokens written into the prompt cache this turn
 	CostUSD                  float64 // provider-reported or estimated; 0 if unknown
+
+	// Estimated is set true when the token counts in this Usage were
+	// NOT reported by the engine — they were estimated by bridle's
+	// tokenizer as a last-resort floor (the usage contract, NEX-581).
+	// A provider that reports real usage leaves this false. The flag
+	// rides through addUsage: if ANY round of a turn was estimated, the
+	// turn total is flagged Estimated. Consumers (cost accounting) can
+	// treat estimated counts as approximate. The guarantee is that a
+	// completed turn never has silently-zero usage — it has real
+	// counts, or a flagged estimate, never nothing.
+	Estimated bool
 }
 
 // ToolInvocation records a single tool call the model made.
@@ -105,21 +119,22 @@ type InboxItem struct {
 // TurnRequest is the complete input for one deliberation turn.
 type TurnRequest struct {
 	// Identity & framing
-	AspectID     string         // who's running (cost/triage/identity attribution)
+	AspectID           string         // who's running (cost/triage/identity attribution)
 	AppendSystemPrompt string         // composed by funnel: NEXUS.md + SOUL.md + PRIMER + harness rules
-	Session      SessionHandle  // opaque handle for provider-side state (subprocess-stream: resume key)
-	SessionTail  []SessionEvent // recent events for direct-api providers to lower into the request
+	SystemPromptMode   SystemPromptMode // how AppendSystemPrompt is applied: append (default, zero value) extends claude-code's base prompt; replace swaps it entirely
+	Session            SessionHandle  // opaque handle for provider-side state (subprocess-stream: resume key)
+	SessionTail        []SessionEvent // recent events for direct-api providers to lower into the request
 
 	// This turn
 	UserMessage string      // the prompt that opens this turn (may be empty for autonomous)
 	Inbox       []InboxItem // mid-turn comms accumulated since last turn
 
 	// Tool surface
-	Tools []ToolDef         // explicit in-process tool defs
-	MCP   *MCPClientConfig  // MCP-loaded tools; nil = no MCP tools this turn
+	Tools []ToolDef        // explicit in-process tool defs
+	MCP   *MCPClientConfig // MCP-loaded tools; nil = no MCP tools this turn
 
 	// Provider
-	Provider ProviderID // claude-api | ollama-local | openai-api | claude-code
+	Provider ProviderID // claude-api | openai-api | bedrock | gemini-api | ollama-local | claude-code | gemini-cli | codex-cli | claude-pty
 	Model    string     // REQUIRED — provider-specific model id; RunTurn returns ErrModelRequired if empty
 	MaxSteps int        // hard cap on tool-call rounds; 0 = unlimited
 
@@ -166,24 +181,34 @@ type TurnRequest struct {
 	// system prompt. Nil = free-form text (provider default).
 	ResponseFormat *ResponseFormat
 
-	// Cwd is the working directory for subprocess-style providers
-	// (currently claude-code). Empty falls through to the bridle host
-	// process's cwd. Per-request rather than per-Harness because
-	// different aspects sharing one Harness need distinct cwds —
-	// claude-code derives its session jsonl path AND its .mcp.json
-	// discovery from cwd, so two aspects with the same Harness but
-	// overlapping cwds collide sessions and leak MCP identity from one
-	// into the other. Direct-API providers (claude-api, ollama, openai)
-	// ignore this field — they have no subprocess to anchor.
+	// ToolCallStrictness is the per-aspect tool-call contract knob
+	// (NEX-581). It controls how hard bridle works to deliver a clean
+	// tool call or clean text when an engine leaks raw protocol tokens.
+	// Empty = repair-then-retry (the default): builders should keep it
+	// strict and never ship a degraded tool call; research aspects can
+	// set "tolerant" to accept structurally-repaired text without a
+	// retry round.
+	ToolCallStrictness ToolCallStrictness
+
+	// Cwd is the working directory for subprocess-style providers.
+	// Empty falls through to the bridle host process's cwd. Per-request
+	// rather than per-Harness because different aspects sharing one
+	// Harness need distinct cwds. For example, claude-code derives its
+	// session jsonl path AND its .mcp.json discovery from cwd, so two
+	// aspects with the same Harness but overlapping cwds collide
+	// sessions and leak MCP identity from one into the other. Codex CLI
+	// receives the same value as both process cwd and `codex --cd`.
+	// Direct-API providers ignore this field — they have no subprocess
+	// to anchor.
 	Cwd string
 
 	// ProviderEnv is per-call environment for the provider. Direct-API
 	// providers read it as their auth/routing config (commonly
 	// ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, OPENAI_API_KEY,
-	// OPENAI_BASE_URL); subprocess providers (claude-code) propagate it
-	// into the spawned process's env so the same per-turn override
-	// pattern applies. nil/empty = use whatever the provider already
-	// has on its own (process env, --bare-style flags, etc).
+	// OPENAI_BASE_URL); subprocess providers propagate it into the
+	// spawned process's env so the same per-turn override pattern
+	// applies. nil/empty = use whatever the provider already has on its
+	// own (process env, --bare-style flags, etc).
 	//
 	// Per-call rather than per-process so a single funnel can mix
 	// credentials across turns — e.g. main turn against the operator's
@@ -192,6 +217,14 @@ type TurnRequest struct {
 	// credential store wires this from aspects.default_*_credential
 	// per task #218.
 	ProviderEnv map[string]string
+
+	// ContextPolicy is the per-aspect context-window policy (the context
+	// contract, NEX-581): a desired window (TargetWindow) and a soft
+	// prompt-size budget (PromptBudget), expressed once here and mapped
+	// by each provider to its engine knob — or warned on engine-
+	// agnostically. Zero value = no policy (engine defaults, no budget
+	// warning). See ContextPolicy.
+	ContextPolicy ContextPolicy
 }
 
 // TurnResult is the structured outcome of a completed turn.
@@ -213,6 +246,33 @@ type TurnResult struct {
 	StopReason    StopReason
 	ResolvedModel string         // model id the upstream API reported; empty when unknown
 	SessionDelta  []SessionEvent // events to propose to the funnel-owned JSONL
+	Timing        TurnTiming     // per-turn timing instrumentation; zero value = not recorded
+}
+
+// RoundTiming captures where one provider round spent its time and
+// what it sent. Secs floats (not Durations) so the struct marshals
+// readably into TurnFrame JSON downstream.
+type RoundTiming struct {
+	AssemblySecs            float64 // request assembly + BeforeModelCall hooks
+	StartupToFirstEventSecs float64 // provider call -> first sink event (CLI lane: spawn+startup+TTFT)
+	StreamSecs              float64 // first event -> provider call return
+	PromptBytes             int     // marshaled request messages size
+	MessageCount            int
+	ToolDefCount            int
+}
+
+// ToolTiming is one tool call's wall-clock duration.
+type ToolTiming struct {
+	ID   string
+	Name string
+	Secs float64
+}
+
+// TurnTiming aggregates per-turn instrumentation. Zero value = not recorded.
+type TurnTiming struct {
+	Rounds    []RoundTiming
+	Tools     []ToolTiming
+	TotalSecs float64
 }
 
 // EventSink receives events as the turn unfolds.
@@ -224,6 +284,16 @@ type EventSink interface {
 type Harness struct {
 	provider Provider
 	hooks    hookRegistry
+	now      func() time.Time // injectable clock; nil means time.Now
+}
+
+// clock returns the harness's time source: the injected now func when
+// set (tests), time.Now otherwise.
+func (h *Harness) clock() func() time.Time {
+	if h.now != nil {
+		return h.now
+	}
+	return time.Now
 }
 
 // NewHarness creates a Harness backed by the given provider.
@@ -234,6 +304,8 @@ func NewHarness(p Provider) *Harness {
 // RunTurn drives one turn: calls the provider, executes tool calls via runner,
 // fires hooks at documented points, and emits events to sink.
 // Cancellation via ctx returns a partial TurnResult with StopReason=aborted.
+// Timing is populated on normal completion and on provider errors; it is
+// zero on context-cancellation aborts.
 // Returns ErrModelRequired if req.Model is empty.
 func (h *Harness) RunTurn(ctx context.Context, req TurnRequest, runner ToolRunner, sink EventSink) (result TurnResult, err error) {
 	if req.Model == "" {
@@ -242,7 +314,9 @@ func (h *Harness) RunTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 	defer func() {
 		if r := recover(); r != nil {
 			e := panicErr(r)
-			sink.Emit(TurnError{Err: e, Stage: TurnErrorStageHarnessRecover})
+			// Stamp directly: this emit bypasses runTurn's stampSink
+			// (the panic unwound past it), so TS would otherwise be zero.
+			sink.Emit(TurnError{Err: e, Stage: TurnErrorStageHarnessRecover, TS: h.clock()()})
 			result.StopReason = StopReasonError
 			err = e
 		}

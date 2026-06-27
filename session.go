@@ -35,9 +35,9 @@ func ParseSessionEvent(e SessionEvent) (NormalizedSessionEvent, error) {
 	case ProviderClaude, ProviderClaudeCode:
 		// Both Anthropic providers use the same block shape.
 		var block struct {
-			Type  string `json:"type"`
-			Text  string `json:"text"`
-			Name  string `json:"name"`
+			Type  string          `json:"type"`
+			Text  string          `json:"text"`
+			Name  string          `json:"name"`
 			Input json.RawMessage `json:"input"`
 		}
 		if err := json.Unmarshal(e.RawJSON, &block); err == nil {
@@ -76,7 +76,7 @@ func ParseSessionEvent(e SessionEvent) (NormalizedSessionEvent, error) {
 		if err := json.Unmarshal(e.RawJSON, &tu); err == nil && tu.Name != "" {
 			return NormalizedSessionEvent{Role: e.Role, Content: fmt.Sprintf("tool_use: %s %s", tu.Name, tu.Input)}, nil
 		}
-	case ProviderGeminiCLI:
+	case ProviderGeminiCLI, ProviderAntigravityCLI:
 		var ev struct {
 			Type       string          `json:"type"`
 			ToolName   string          `json:"tool_name"`
@@ -92,6 +92,20 @@ func ParseSessionEvent(e SessionEvent) (NormalizedSessionEvent, error) {
 				if ev.SessionID != "" {
 					return NormalizedSessionEvent{Role: e.Role, Content: fmt.Sprintf("init: session=%s model=%s", ev.SessionID, ev.Model)}, nil
 				}
+			}
+		}
+	case ProviderCodexCLI:
+		var ev struct {
+			Type     string `json:"type"`
+			ThreadID string `json:"thread_id"`
+			Command  string `json:"command"`
+		}
+		if err := json.Unmarshal(e.RawJSON, &ev); err == nil {
+			switch ev.Type {
+			case "thread.started":
+				return NormalizedSessionEvent{Role: e.Role, Content: fmt.Sprintf("init: thread=%s", ev.ThreadID)}, nil
+			case "command_execution":
+				return NormalizedSessionEvent{Role: e.Role, Content: fmt.Sprintf("tool_use: command_execution %s", ev.Command)}, nil
 			}
 		}
 	case ProviderGemini:
@@ -135,9 +149,9 @@ type SessionHandle struct {
 // The harness consumes SessionTail on the way in and proposes SessionDelta
 // on the way out.
 type SessionEvent struct {
-	Provider ProviderID      `json:"provider,omitempty"` // who produced this event
-	Role     SessionRole     `json:"role"`
-	Content  string          `json:"content,omitempty"`
+	Provider ProviderID  `json:"provider,omitempty"` // who produced this event
+	Role     SessionRole `json:"role"`
+	Content  string      `json:"content,omitempty"`
 	// RawJSON carries provider-specific blocks (tool_use, tool_result, etc.)
 	// that don't fit the plain content field. Valid only in conjunction with Provider.
 	RawJSON json.RawMessage `json:"raw,omitempty"`
