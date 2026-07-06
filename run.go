@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -849,5 +850,15 @@ func mergeToolSurface(explicit []ToolDef, mcpTools []mcpclient.ToolDef) ([]ToolD
 			InputSchema: t.InputSchema,
 		})
 	}
+	// MCP servers are re-connected and re-listed on EVERY RunTurn (see the
+	// connect/list loop above), and each server's ListTools order is
+	// server-dependent (not guaranteed stable across calls, let alone
+	// across servers). The merged tool surface is serialized into the
+	// prompt prefix on every provider call (provider/openai/openai.go),
+	// so any reordering here invalidates the vLLM prefix cache from
+	// token 0. Sorting by name makes the serialized block byte-stable
+	// across turns regardless of MCP listing order, so the shared
+	// prefix (system + tools) can actually be cached.
+	sort.Slice(merged, func(i, j int) bool { return merged[i].Name < merged[j].Name })
 	return merged, nil
 }
