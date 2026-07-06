@@ -126,6 +126,25 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 	// callers wanting structured output bake instructions into the
 	// system prompt. Silently ignored.
 
+	// ThinkingBudgetTokens: extended-thinking budget. Anthropic requires
+	// budget_tokens >= 1024 AND < max_tokens. Callers asking for "some"
+	// thinking with a sub-1024 budget aren't rejected — round up to the
+	// API floor rather than error, since a caller specifying any nonzero
+	// value clearly wants thinking enabled. If the effective max_tokens
+	// isn't already comfortably above the budget, bump it so the request
+	// doesn't 400 (max_tokens must exceed budget_tokens).
+	if req.ThinkingBudgetTokens > 0 {
+		budget := int64(req.ThinkingBudgetTokens)
+		if budget < 1024 {
+			budget = 1024
+		}
+		if maxTokens <= budget {
+			maxTokens = budget + defaultClaudeMaxTokens
+			params.MaxTokens = maxTokens
+		}
+		params.Thinking = anthropic.ThinkingConfigParamOfEnabled(budget)
+	}
+
 	tools := toClaudeTools(req.Tools)
 	if len(tools) > 0 {
 		params.Tools = tools

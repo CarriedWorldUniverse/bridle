@@ -163,6 +163,12 @@ type TurnRequest struct {
 	TopK        *int
 	Seed        *int
 
+	// ThinkingBudgetTokens requests Anthropic extended-thinking with this token
+	// budget. Anthropic requires it be >= 1024 and < the request's max_tokens.
+	// 0 = unset/disabled (provider default, no thinking). Claude-only; other
+	// providers ignore it, same as Seed/TopK precedent.
+	ThinkingBudgetTokens int
+
 	// MaxOutputTokens caps generation length. 0 = provider default
 	// (claude internally falls back to 4096; openai uses its own
 	// account-level default). Set non-zero for cost-bounded paths

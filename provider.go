@@ -73,6 +73,12 @@ type ProviderRequest struct {
 	StopSequences   []string
 	ResponseFormat  *ResponseFormat
 
+	// ThinkingBudgetTokens requests Anthropic extended-thinking with this token
+	// budget. Anthropic requires it be >= 1024 and < the request's max_tokens.
+	// 0 = unset/disabled (provider default, no thinking). Claude-only; other
+	// providers ignore it, same as Seed/TopK precedent.
+	ThinkingBudgetTokens int
+
 	// ToolCallStrictness mirrors TurnRequest.ToolCallStrictness so the
 	// harness's post-provider tool-call contract step (NEX-581) can read
 	// the per-aspect knob from the lowered request. Providers themselves
