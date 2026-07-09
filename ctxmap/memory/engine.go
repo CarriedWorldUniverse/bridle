@@ -311,6 +311,11 @@ func (e *Engine) extractTurn(turnN int) {
 
 	var ids []string
 	for _, p := range props {
+		// questions assert nothing — a fact judged to come from a question is
+		// a presupposition leak, the poisoning vector the force pass guards
+		if p.Force == extractor.ForceQuestion {
+			continue
+		}
 		kind := store.Kind(p.Kind)
 		trust := store.TrustModelObserved
 		if kind == store.KindDerived {
@@ -318,11 +323,31 @@ func (e *Engine) extractTurn(turnN int) {
 		}
 		// model-proposed source, deterministically ground-checked: model
 		// say-so never mints operator trust
-		if p.Source == "user" && kind != store.KindDerived && groundedInText(p.Statement, curUser) {
+		performative := false
+		// directives are phrased as intent ("The operator wants …") — strip
+		// the wrapper before grounding, since those words are never in the
+		// user's own text
+		groundStmt := p.Statement
+		if p.Force == extractor.ForceDirective {
+			low := strings.ToLower(groundStmt)
+			for _, pre := range []string{"the operator wants ", "operator wants "} {
+				if strings.HasPrefix(low, pre) {
+					groundStmt = groundStmt[len(pre):]
+					break
+				}
+			}
+		}
+		if p.Source == "user" && kind != store.KindDerived && groundedInText(groundStmt, curUser) {
 			trust = store.TrustOperatorStated
+			// decisions and directives are performative (saying makes it so:
+			// the rule exists / the intent is real). REPORTs describe world
+			// state the operator can be wrong about: top trust rank for
+			// conflicts, but PROPOSED entry — promotion via reuse or pin.
+			// Unknown force degrades conservatively to REPORT semantics.
+			performative = p.Force == extractor.ForceDecision || p.Force == extractor.ForceDirective
 		}
 		f := store.Fact{
-			Statement: p.Statement, Kind: kind, Trust: trust, Confidence: p.Confidence,
+			Statement: p.Statement, Kind: kind, Trust: trust, Confidence: p.Confidence, Performative: performative,
 			Entities: p.Entities, SessionID: e.cfg.SessionID,
 			Provenance: []store.Span{{SessionID: e.cfg.SessionID, Turn: turnN, Start: 0, End: len(cur.user) + len(cur.assistant)}},
 		}
@@ -482,11 +507,33 @@ func groundedInText(statement, text string) bool {
 	}
 	hit := 0
 	for w := range stmt {
-		if src[w] {
+		if src[w] || src[stem(w)] || srcHasStem(src, w) {
 			hit++
 		}
 	}
 	return float64(hit)/float64(len(stmt)) >= 0.6
+}
+
+// stem: crude suffix strip so "raised"/"raise", "caps"/"cap" ground each other.
+func stem(w string) string {
+	for _, suf := range []string{"ed", "es", "s", "ing"} {
+		if strings.HasSuffix(w, suf) && len(w)-len(suf) >= 4 {
+			return w[:len(w)-len(suf)]
+		}
+	}
+	return w
+}
+
+func srcHasStem(src map[string]bool, w string) bool {
+	ws := stem(w)
+	for s := range src {
+		ss := stem(s)
+		// prefix-tolerant: "rais"(<-raised) matches "raise"; both directions
+		if ss == ws || (len(ws) >= 4 && strings.HasPrefix(ss, ws)) || (len(ss) >= 4 && strings.HasPrefix(ws, ss)) {
+			return true
+		}
+	}
+	return false
 }
 
 func tokset(s string) map[string]bool {

@@ -37,7 +37,7 @@ func TestAttachEndToEnd(t *testing.T) {
 	// seed a verified fact the model will recall
 	fid, err := st.AssertFact(store.Fact{
 		Statement: "pool workers are named personality-role", Kind: store.KindObserved,
-		Trust: store.TrustOperatorStated, Provenance: []store.Span{{SessionID: "x", Turn: 1, Start: 0, End: 5}},
+		Trust: store.TrustOperatorStated, Performative: true, Provenance: []store.Span{{SessionID: "x", Turn: 1, Start: 0, End: 5}},
 		Entities: []string{"pool-workers"},
 	})
 	if err != nil {
@@ -46,7 +46,7 @@ func TestAttachEndToEnd(t *testing.T) {
 	rend.NewEpoch() // pull it into the core
 
 	prop := &fakeProposer{out: []extractor.FactProposal{
-		{Statement: "the render seat moves to ember-node", Kind: "OBSERVED", Source: "user", Entities: []string{"ember-node"}},
+		{Statement: "the render seat moves to ember-node", Kind: "OBSERVED", Source: "user", Force: extractor.ForceDecision, Entities: []string{"ember-node"}},
 	}}
 	eng := memory.New(memory.Config{SessionID: "sessA"}, st, rend, prop, nil, nil)
 	defer eng.Close()

@@ -88,6 +88,12 @@ type Fact struct {
 	Entities      []string
 	Parents       []string
 	Provenance    []Span
+	// Performative marks facts whose utterance MAKES them true (decisions,
+	// rules, namings, stated intents). Only performative operator-stated
+	// facts enter VERIFIED on assertion; operator world-state REPORTS keep
+	// top trust rank for conflicts but enter PROPOSED — VERIFIED means
+	// "safe to build on", not "the operator said it".
+	Performative  bool
 	SessionID     string
 	Created       time.Time
 	LastConfirmed time.Time
@@ -198,7 +204,7 @@ func (s *Store) AssertFact(f Fact) (string, error) {
 	}
 	f.ID = newID()
 	f.Status = StatusProposed
-	if f.Trust == TrustOperatorStated {
+	if f.Trust == TrustOperatorStated && f.Performative {
 		f.Status = StatusVerified
 	}
 	now := time.Now().UTC()

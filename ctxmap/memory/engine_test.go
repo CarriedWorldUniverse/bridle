@@ -35,7 +35,7 @@ func rig(t *testing.T) (*Engine, *store.Store, *fakeProposer) {
 func TestAssembleRecordExtractLoop(t *testing.T) {
 	e, st, prop := rig(t)
 	prop.out = []extractor.FactProposal{
-		{Statement: "the render seat moves to ember-node", Kind: "OBSERVED", Source: "user", Entities: []string{"ember-node"}},
+		{Statement: "the render seat moves to ember-node", Kind: "OBSERVED", Source: "user", Force: extractor.ForceDecision, Entities: []string{"ember-node"}},
 	}
 	b := e.AssembleBlocks("decision: the render seat moves to ember-node", 1)
 	if !strings.Contains(b.Framing, "automatic") || !strings.Contains(b.Core, "Working memory — core") {
@@ -61,7 +61,7 @@ func TestAssembleRecordExtractLoop(t *testing.T) {
 func TestToolsRecallAndInspect(t *testing.T) {
 	e, st, prop := rig(t)
 	prop.out = []extractor.FactProposal{
-		{Statement: "pool workers are named personality-role", Kind: "OBSERVED", Source: "user", Entities: []string{"pool-workers"}},
+		{Statement: "pool workers are named personality-role", Kind: "OBSERVED", Source: "user", Force: extractor.ForceDecision, Entities: []string{"pool-workers"}},
 	}
 	e.RecordTurn(1, "note: pool workers are named personality-role", "got it", nil)
 	ids := e.WaitExtraction()
@@ -95,5 +95,38 @@ func TestExtractionDisabledDegradesGracefully(t *testing.T) {
 	e.RecordTurn(1, "hello", "world", nil)
 	if ids := e.WaitExtraction(); len(ids) != 0 {
 		t.Fatal("no proposer must mean no extraction")
+	}
+}
+
+
+func TestForceSemantics(t *testing.T) {
+	e, st, prop := rig(t)
+	// QUESTION presupposition: dropped entirely
+	prop.out = []extractor.FactProposal{{Statement: "the broker is on li1", Kind: "OBSERVED", Source: "user", Force: extractor.ForceQuestion, Entities: []string{"broker"}}}
+	e.RecordTurn(1, "why does the broker on li1 keep dropping connections?", "let me look", nil)
+	if ids := e.WaitExtraction(); len(ids) != 0 {
+		t.Fatal("question presuppositions must not become facts")
+	}
+	// REPORT: operator trust, PROPOSED entry
+	prop.out = []extractor.FactProposal{{Statement: "the build is green", Kind: "OBSERVED", Source: "user", Force: extractor.ForceReport, Entities: []string{"build"}}}
+	e.RecordTurn(2, "fyi the build is green", "noted", nil)
+	ids := e.WaitExtraction()
+	if len(ids) != 1 {
+		t.Fatalf("want 1 fact, got %d", len(ids))
+	}
+	f, _ := st.Get(ids[0])
+	if f.Trust != store.TrustOperatorStated || f.Status != store.StatusProposed {
+		t.Fatalf("REPORT: want OPERATOR_STATED/PROPOSED, got %s/%s", f.Trust, f.Status)
+	}
+	// DIRECTIVE: intent is performative -> VERIFIED
+	prop.out = []extractor.FactProposal{{Statement: "The operator wants the settlement cap raised to 60", Kind: "PREFERENCE", Source: "user", Force: extractor.ForceDirective, Entities: []string{"settlement-gen"}}}
+	e.RecordTurn(3, "raise the settlement cap to 60 please", "on it", nil)
+	ids = e.WaitExtraction()
+	if len(ids) != 1 {
+		t.Fatalf("want 1 fact, got %d", len(ids))
+	}
+	f, _ = st.Get(ids[0])
+	if f.Status != store.StatusVerified {
+		t.Fatalf("DIRECTIVE intent is performative: want VERIFIED, got %s", f.Status)
 	}
 }

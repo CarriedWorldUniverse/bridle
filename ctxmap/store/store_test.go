@@ -48,7 +48,7 @@ func TestLifecycleEntryAndPromotion(t *testing.T) {
 		t.Fatalf("want PROPOSED, got %s", f.Status)
 	}
 	// operator-stated enters VERIFIED
-	oid, _ := s.AssertFact(Fact{Statement: "we renamed the node", Kind: KindObserved, Trust: TrustOperatorStated, Provenance: span()})
+	oid, _ := s.AssertFact(Fact{Statement: "we renamed the node", Kind: KindObserved, Trust: TrustOperatorStated, Performative: true, Provenance: span()})
 	of, _ := s.Get(oid)
 	if of.Status != StatusVerified {
 		t.Fatalf("operator-stated should enter VERIFIED, got %s", of.Status)
@@ -92,7 +92,7 @@ func TestContradictionTrustRules(t *testing.T) {
 	s := openTest(t)
 	old, _ := s.AssertFact(Fact{Statement: "results go to sqlite", Kind: KindObserved, Trust: TrustModelObserved, Provenance: span()})
 	// operator correction beats model fact
-	corr, _ := s.AssertFact(Fact{Statement: "results go to postgres", Kind: KindObserved, Trust: TrustOperatorStated, Provenance: span()})
+	corr, _ := s.AssertFact(Fact{Statement: "results go to postgres", Kind: KindObserved, Trust: TrustOperatorStated, Performative: true, Provenance: span()})
 	retracted, err := s.ResolveContradiction(corr, old)
 	if err != nil || !retracted {
 		t.Fatalf("operator correction should retract, got retracted=%v err=%v", retracted, err)
@@ -115,7 +115,7 @@ func TestContradictionTrustRules(t *testing.T) {
 	// pinned fact: never auto-retract even against operator statement
 	p, _ := s.AssertFact(Fact{Statement: "the kernel never allocates mid-tick", Kind: KindConstraint, Trust: TrustModelObserved, Provenance: span()})
 	s.Pin(p)
-	q, _ := s.AssertFact(Fact{Statement: "the kernel allocates mid-tick", Kind: KindObserved, Trust: TrustOperatorStated, Provenance: span()})
+	q, _ := s.AssertFact(Fact{Statement: "the kernel allocates mid-tick", Kind: KindObserved, Trust: TrustOperatorStated, Performative: true, Provenance: span()})
 	retracted, _ = s.ResolveContradiction(q, p)
 	if retracted {
 		t.Fatal("pinned fact must never auto-retract")
@@ -135,7 +135,7 @@ func TestRetractionCascadesStale(t *testing.T) {
 
 func TestCoreAndAudit(t *testing.T) {
 	s := openTest(t)
-	v, _ := s.AssertFact(Fact{Statement: "broker lives on li1", Kind: KindObserved, Trust: TrustOperatorStated, Provenance: span()})
+	v, _ := s.AssertFact(Fact{Statement: "broker lives on li1", Kind: KindObserved, Trust: TrustOperatorStated, Performative: true, Provenance: span()})
 	p, _ := s.AssertFact(Fact{Statement: "maybe X", Kind: KindObserved, Trust: TrustModelObserved, Provenance: span()})
 	core, _ := s.Core()
 	if len(core) != 1 || core[0].ID != v {
@@ -146,7 +146,7 @@ func TestCoreAndAudit(t *testing.T) {
 		t.Fatalf("clean store should audit clean, got %v", issues)
 	}
 	// force a live core contradiction and catch it
-	v2, _ := s.AssertFact(Fact{Statement: "broker lives on li2", Kind: KindObserved, Trust: TrustOperatorStated, Provenance: span()})
+	v2, _ := s.AssertFact(Fact{Statement: "broker lives on li2", Kind: KindObserved, Trust: TrustOperatorStated, Performative: true, Provenance: span()})
 	s.Link(v2, v, LinkContradicts)
 	found := false
 	for _, i := range s.Audit() {
@@ -180,7 +180,7 @@ func TestQueryAndNeighbors(t *testing.T) {
 func TestCrossSessionVisibility(t *testing.T) {
 	s := openTest(t)
 	// session A: one VERIFIED (operator) + one PROPOSED (model) fact
-	va, _ := s.AssertFact(Fact{Statement: "the broker moved to li1 for good", Kind: KindObserved, Trust: TrustOperatorStated, SessionID: "sessA", Provenance: span(), Entities: []string{"broker"}})
+	va, _ := s.AssertFact(Fact{Statement: "the broker moved to li1 for good", Kind: KindObserved, Trust: TrustOperatorStated, Performative: true, SessionID: "sessA", Provenance: span(), Entities: []string{"broker"}})
 	pa, _ := s.AssertFact(Fact{Statement: "the broker port is probably 7888", Kind: KindObserved, Trust: TrustModelObserved, SessionID: "sessA", Provenance: span(), Entities: []string{"broker"}})
 
 	// session B sees A's VERIFIED fact, not A's PROPOSED
@@ -199,4 +199,21 @@ func TestCrossSessionVisibility(t *testing.T) {
 		t.Fatalf("admin view should see all: got %d", len(got))
 	}
 	_ = pa
+}
+
+
+func TestOperatorReportEntersProposed(t *testing.T) {
+	s := openTest(t)
+	// a world-state report from the operator: top trust, PROPOSED entry
+	id, _ := s.AssertFact(Fact{Statement: "the build is green", Kind: KindObserved, Trust: TrustOperatorStated, Performative: false, Provenance: span()})
+	f, _ := s.Get(id)
+	if f.Status != StatusProposed {
+		t.Fatalf("operator REPORT must enter PROPOSED, got %s", f.Status)
+	}
+	// but it still wins conflicts by trust rank
+	m, _ := s.AssertFact(Fact{Statement: "the build is red and failing", Kind: KindObserved, Trust: TrustModelObserved, Provenance: span()})
+	retracted, _ := s.ResolveContradiction(id, m)
+	if !retracted {
+		t.Fatal("operator report must outrank model observation in conflicts")
+	}
 }

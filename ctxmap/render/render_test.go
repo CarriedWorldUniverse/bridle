@@ -27,7 +27,7 @@ func TestCoreByteStableWithinEpoch(t *testing.T) {
 	st, r := setup(t)
 	first := r.RenderCore()
 	// new VERIFIED fact lands mid-epoch — core text must NOT change
-	st.AssertFact(store.Fact{Statement: "broker on li1", Kind: store.KindObserved, Trust: store.TrustOperatorStated, Provenance: sp()})
+	st.AssertFact(store.Fact{Statement: "broker on li1", Kind: store.KindObserved, Trust: store.TrustOperatorStated, Performative: true, Provenance: sp()})
 	if r.RenderCore() != first {
 		t.Fatal("core text changed within an epoch (invariant 4 violated)")
 	}
@@ -45,7 +45,7 @@ func TestCoreByteStableWithinEpoch(t *testing.T) {
 
 func TestSubgraphMarksAndDedup(t *testing.T) {
 	st, r := setup(t)
-	vid, _ := st.AssertFact(store.Fact{Statement: "kernel never allocates mid-tick", Kind: store.KindConstraint, Trust: store.TrustOperatorStated, Provenance: sp()})
+	vid, _ := st.AssertFact(store.Fact{Statement: "kernel never allocates mid-tick", Kind: store.KindConstraint, Trust: store.TrustOperatorStated, Performative: true, Provenance: sp()})
 	pid, _ := st.AssertFact(store.Fact{Statement: "loader blocks the frame", Kind: store.KindObserved, Trust: store.TrustModelObserved, Provenance: sp()})
 	did, _ := st.AssertFact(store.Fact{Statement: "so loader must move off-thread", Kind: store.KindDerived, Trust: store.TrustModelDerived, Provenance: sp(), Parents: []string{pid}})
 	r.NewEpoch() // core now holds vid
@@ -74,7 +74,7 @@ func TestSubgraphMarksAndDedup(t *testing.T) {
 
 func TestContradictionNoticeOnCoreFact(t *testing.T) {
 	st, r := setup(t)
-	cid, _ := st.AssertFact(store.Fact{Statement: "pod layout is single", Kind: store.KindObserved, Trust: store.TrustOperatorStated, Provenance: sp()})
+	cid, _ := st.AssertFact(store.Fact{Statement: "pod layout is single", Kind: store.KindObserved, Trust: store.TrustOperatorStated, Performative: true, Provenance: sp()})
 	r.NewEpoch()
 	nid, _ := st.AssertFact(store.Fact{Statement: "pod layout is split", Kind: store.KindObserved, Trust: store.TrustModelObserved, Provenance: sp()})
 	st.Link(nid, cid, store.LinkContradicts)
