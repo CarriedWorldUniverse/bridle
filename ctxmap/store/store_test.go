@@ -201,7 +201,6 @@ func TestCrossSessionVisibility(t *testing.T) {
 	_ = pa
 }
 
-
 func TestOperatorReportEntersProposed(t *testing.T) {
 	s := openTest(t)
 	// a world-state report from the operator: top trust, PROPOSED entry

@@ -13,8 +13,8 @@ package store
 
 import (
 	"crypto/rand"
-	"encoding/binary"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -77,17 +77,17 @@ type Span struct {
 }
 
 type Fact struct {
-	ID            string
-	Statement     string
-	Kind          Kind
-	Status        Status
-	Stale         bool
-	Pinned        bool
-	Trust         Trust
-	Confidence    float64
-	Entities      []string
-	Parents       []string
-	Provenance    []Span
+	ID         string
+	Statement  string
+	Kind       Kind
+	Status     Status
+	Stale      bool
+	Pinned     bool
+	Trust      Trust
+	Confidence float64
+	Entities   []string
+	Parents    []string
+	Provenance []Span
 	// Performative marks facts whose utterance MAKES them true (decisions,
 	// rules, namings, stated intents). Only performative operator-stated
 	// facts enter VERIFIED on assertion; operator world-state REPORTS keep
@@ -172,7 +172,7 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`),
 	regexp.MustCompile(`AKIA[0-9A-Z]{16}`),
 	regexp.MustCompile(`eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}`), // JWT
-	regexp.MustCompile(`\b[A-Za-z0-9+/=]{40,}\b`),                     // long high-entropy-ish blob
+	regexp.MustCompile(`\b[A-Za-z0-9+/=]{40,}\b`),                      // long high-entropy-ish blob
 }
 
 func containsSecret(text string) bool {

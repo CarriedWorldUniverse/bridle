@@ -209,5 +209,5 @@ func (m *Model) NewEmbedContext(nCtx, nThreads int) (*Context, error) {
 	return &Context{ctx: ctx, m: m, nCtx: nCtx}, nil
 }
 
-func (c *Context) Free()  { C.llama_free(c.ctx) }
-func (m *Model) Free()    { C.llama_model_free(m.model); C.llama_backend_free() }
+func (c *Context) Free() { C.llama_free(c.ctx) }
+func (m *Model) Free()   { C.llama_model_free(m.model); C.llama_backend_free() }

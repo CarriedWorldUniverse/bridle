@@ -38,4 +38,3 @@ func (l *Llama) Close() {
 	l.ctx.Free()
 	l.m.Free()
 }
-

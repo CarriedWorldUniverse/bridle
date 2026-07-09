@@ -138,6 +138,18 @@ func (e *Engine) AssembleBlocks(userMsg string, turnN int) Blocks {
 			b.Notices = append(b.Notices, strings.TrimPrefix(strings.TrimSpace(line), "- "))
 		}
 	}
+	// synthetic in-turn conflict notice: extraction-produced CONTRADICTS links
+	// land one turn late (async), and an ambient constraint line in the
+	// subgraph measurably loses to task momentum (challenge bench: 0-1/3).
+	// When a VERIFIED CONSTRAINT overlaps the incoming message, say so
+	// EXPLICITLY, adjacent to the request.
+	for _, f := range seeds {
+		if f.Kind == store.KindConstraint && f.Status == store.StatusVerified && overlapF1(f.Statement, userMsg) >= 0.25 {
+			n := fmt.Sprintf("NOTICE: this request may conflict with the established constraint [%s] %q — check before acting, and raise the conflict with the user if it holds.", f.ID, f.Statement)
+			b.Notices = append(b.Notices, n)
+			b.Subgraph = strings.TrimRight(b.Subgraph, "\n") + "\n- " + n + "\n"
+		}
+	}
 	return b
 }
 

@@ -98,7 +98,6 @@ func TestExtractionDisabledDegradesGracefully(t *testing.T) {
 	}
 }
 
-
 func TestForceSemantics(t *testing.T) {
 	e, st, prop := rig(t)
 	// QUESTION presupposition: dropped entirely

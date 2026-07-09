@@ -7,11 +7,11 @@ import (
 	"testing"
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
-	"github.com/CarriedWorldUniverse/bridle/fake"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/extractor"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/memory"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/render"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/store"
+	"github.com/CarriedWorldUniverse/bridle/fake"
 )
 
 type fakeProposer struct{ out []extractor.FactProposal }
