@@ -115,7 +115,7 @@ func (e *Engine) Close() {
 // being unable to "save" facts (measured; see the write-up).
 const Framing = `## Working memory (automatic)
 Durable facts from this conversation are captured for you automatically in the background — you never save, persist, or write anything yourself, and you have no tool to do so. Facts already known appear under "Working memory" below; treat them as established context. Just converse naturally: when the user tells you something, respond to its substance — do not acknowledge it as "saved" or apologize for being unable to save it. Use the ` + "`recall`" + ` tool ONLY when you need older context that is not visible in the prompt, and ` + "`inspect`" + ` only to check a fact's evidence. Never call them just to verify that something was stored.
-If a NOTICE line reports a conflict — especially between what is being asked and an established constraint — raise it to the user ONCE, plainly, citing both sides, before doing the work. Then take their answer and commit to it fully, without relitigating.`
+BEFORE acting on a request, check it against the constraints shown in working memory. If the request conflicts with a constraint — or a NOTICE line reports a conflict — raise it to the user ONCE, plainly, citing both sides, and do NOT do the conflicting work until they answer. Then commit to their answer fully, without relitigating.`
 
 // AssembleBlocks prepares the memory blocks for the next turn. It also
 // auto-consolidates (re-renders the core) when the verified set moved —
@@ -266,7 +266,22 @@ func (e *Engine) retrieve(msg string) []*store.Fact {
 	for i := len(e.turns) - 1; i >= 0 && i >= len(e.turns)-e.cfg.ContextTurns; i-- {
 		text += " " + e.turns[i].user
 	}
-	for _, w := range wordRe.FindAllString(text, 12) {
+	words := wordRe.FindAllString(text, 12)
+	// constraints first: a VERIFIED CONSTRAINT sharing words with the incoming
+	// message must be in front of the model AT THE VIOLATING TURN — conflict
+	// links from extraction land one turn late by construction (async), so
+	// in-turn challenge depends on retrieval, not on notices (measured:
+	// challenge rate 1/3 without this priority)
+	for _, w := range words {
+		if fs, err := e.st.QueryText(w, 3, e.cfg.SessionID); err == nil {
+			for _, f := range fs {
+				if f.Kind == store.KindConstraint && f.Status == store.StatusVerified {
+					add([]*store.Fact{f})
+				}
+			}
+		}
+	}
+	for _, w := range words {
 		if fs, err := e.st.QueryText(w, 3, e.cfg.SessionID); err == nil {
 			add(fs)
 		}
