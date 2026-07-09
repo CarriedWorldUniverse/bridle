@@ -130,3 +130,62 @@ func TestForceSemantics(t *testing.T) {
 		t.Fatalf("DIRECTIVE intent is performative: want VERIFIED, got %s", f.Status)
 	}
 }
+
+type fixedJudge struct{ v extractor.PairVerdict }
+
+func (j *fixedJudge) JudgePair(a, b string) (extractor.PairVerdict, error) { return j.v, nil }
+
+type topicEmbedder struct{}
+
+func (topicEmbedder) Embed(text string) ([]float32, error) {
+	// all statements share a topic => always same-topic candidates
+	return []float32{1, 0, 0, 0}, nil
+}
+
+func TestDirectiveConflictFlagsNotResolves(t *testing.T) {
+	e, st, prop := rig(t)
+	e2 := e // engine from rig has no embedder/judge; rebuild with them
+	_ = e2
+	st2, _ := store.Open(":memory:")
+	defer st2.Close()
+	rend2, _ := render.New(st2)
+	prop2 := &fakeProposer{}
+	eng := New(Config{SessionID: "test"}, st2, rend2, prop2, topicEmbedder{}, &fixedJudge{v: extractor.PairContradicts})
+	defer eng.Close()
+
+	// establish the constraint (operator decision -> VERIFIED)
+	prop2.out = []extractor.FactProposal{{Statement: "biome blending must never sample across chunk seams", Kind: "CONSTRAINT", Source: "user", Force: extractor.ForceDecision, Entities: []string{"biome-blending"}}}
+	eng.RecordTurn(1, "hard rule: biome blending must never sample across chunk seams", "understood", nil)
+	ids := eng.WaitExtraction()
+	cid := ids[0]
+	rend2.NewEpoch()
+
+	// a directive that violates it: must land as intent, LINKED, constraint NOT retracted
+	prop2.out = []extractor.FactProposal{{Statement: "The operator wants biome blending to sample across chunk seams", Kind: "PREFERENCE", Source: "user", Force: extractor.ForceDirective, Entities: []string{"biome-blending"}}}
+	eng.RecordTurn(2, "please make biome blending sample across chunk seams to smooth borders", "…", nil)
+	ids = eng.WaitExtraction()
+	if len(ids) != 1 {
+		t.Fatalf("intent fact must land, got %d", len(ids))
+	}
+	cf, _ := st2.Get(cid)
+	if cf.Status == store.StatusRetracted {
+		t.Fatal("directive must NOT retract the constraint it conflicts with")
+	}
+	links, _ := st2.Links(ids[0])
+	if len(links[store.LinkContradicts]) == 0 {
+		t.Fatal("directive-vs-constraint must be LINKED so the notice fires")
+	}
+	// and the notice actually renders for the next turn
+	b := eng.AssembleBlocks("anything", 3)
+	found := false
+	for _, n := range b.Notices {
+		if strings.Contains(n, cid) || strings.Contains(n, ids[0]) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("conflict notice must surface, got %v", b.Notices)
+	}
+	_ = st
+	_ = prop
+}

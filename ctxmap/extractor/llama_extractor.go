@@ -188,7 +188,7 @@ func buildExtractionPrompt(current Turn, context []Turn, glossary map[string]str
 
 const pairSystemPrompt = `Two statements about the same topic. Think briefly, then answer with exactly one word:
 - SAME: they assert the same fact (different wording is fine)
-- CONTRADICTS: they cannot both be true (a value, place, or polarity differs)
+- CONTRADICTS: they cannot both be true (a value, place, or polarity differs) — OR one is a standing rule/constraint and the other asks or intends to violate it
 - DISTINCT: compatible but different facts about the topic`
 
 // JudgePair classifies the relation between a new statement and an existing

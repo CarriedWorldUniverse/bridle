@@ -114,7 +114,8 @@ func (e *Engine) Close() {
 // Framing tells the model memory is automatic — omit it and models fixate on
 // being unable to "save" facts (measured; see the write-up).
 const Framing = `## Working memory (automatic)
-Durable facts from this conversation are captured for you automatically in the background — you never save, persist, or write anything yourself, and you have no tool to do so. Facts already known appear under "Working memory" below; treat them as established context. Just converse naturally: when the user tells you something, respond to its substance — do not acknowledge it as "saved" or apologize for being unable to save it. Use the ` + "`recall`" + ` tool ONLY when you need older context that is not visible in the prompt, and ` + "`inspect`" + ` only to check a fact's evidence. Never call them just to verify that something was stored.`
+Durable facts from this conversation are captured for you automatically in the background — you never save, persist, or write anything yourself, and you have no tool to do so. Facts already known appear under "Working memory" below; treat them as established context. Just converse naturally: when the user tells you something, respond to its substance — do not acknowledge it as "saved" or apologize for being unable to save it. Use the ` + "`recall`" + ` tool ONLY when you need older context that is not visible in the prompt, and ` + "`inspect`" + ` only to check a fact's evidence. Never call them just to verify that something was stored.
+If a NOTICE line reports a conflict — especially between what is being asked and an established constraint — raise it to the user ONCE, plainly, citing both sides, before doing the work. Then take their answer and commit to it fully, without relitigating.`
 
 // AssembleBlocks prepares the memory blocks for the next turn. It also
 // auto-consolidates (re-renders the core) when the verified set moved —
@@ -356,7 +357,16 @@ func (e *Engine) extractTurn(turnN int) {
 			continue
 		} else if contraID != "" {
 			if id, err := e.st.AssertFact(f); err == nil {
-				e.st.ResolveContradiction(id, contraID)
+				if p.Force == extractor.ForceDirective {
+					// an ASK that conflicts with an established fact/rule is
+					// surfaced, never silently resolved: the newer-operator-
+					// statement-wins rule would retract the constraint the
+					// operator themselves verified. Link -> notice -> the
+					// model raises it (challenge principle).
+					e.st.Link(id, contraID, store.LinkContradicts)
+				} else {
+					e.st.ResolveContradiction(id, contraID)
+				}
 				ids = append(ids, id)
 				e.saveEmbedding(id, p.Statement)
 			}
