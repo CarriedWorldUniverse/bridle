@@ -237,6 +237,16 @@ func (e *Engine) runInspect(args json.RawMessage) string {
 	return fmt.Sprintf("[%s] %s (kind=%s status=%s trust=%s)\nEVIDENCE:\n%s", f.ID, f.Statement, f.Kind, f.Status, f.Trust, ev)
 }
 
+// Preview renders what the next turn's subgraph would contain for a
+// hypothetical message — no model call, no RecordRender bookkeeping.
+// Debug/eval surface (ctxmapd render_preview).
+func (e *Engine) Preview(msg string) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	sub, _ := e.rend.RenderSubgraph(e.retrieve(msg))
+	return e.rend.RenderCore() + "\n\n" + sub
+}
+
 // ---- retrieval (word-match fallback; embedding retrieval is a future unit) ----
 
 var wordRe = regexp.MustCompile(`[a-zA-Z0-9][a-zA-Z0-9_-]{3,}`)
