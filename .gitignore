@@ -6,3 +6,6 @@
 .DS_Store
 .idea/
 .vscode/
+
+# ctxmap llama.cpp staging (make vendor-llama)
+vendor-llama/
