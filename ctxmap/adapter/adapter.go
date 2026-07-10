@@ -118,8 +118,8 @@ func (a *attachment) beforeToolCall(_ context.Context, in bridle.BeforeToolCallC
 }
 
 func (a *attachment) afterToolCall(_ context.Context, in bridle.AfterToolCallCtx) (bridle.AfterToolCallCtx, bridle.HookAction, error) {
-	if _, ours := a.tools[in.Call.Name]; ours {
-		return in, bridle.HookContinue, nil // our own tools return distilled/short results already
+	if _, ours := a.tools[in.Call.Name]; ours || in.Call.Name == "read_raw" {
+		return in, bridle.HookContinue, nil // memory tools + read_raw are already short/verbatim-by-design; never re-distill
 	}
 	if in.Result.Err != "" {
 		return in, bridle.HookContinue, nil // leave errors verbatim
