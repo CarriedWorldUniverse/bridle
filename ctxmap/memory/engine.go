@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/CarriedWorldUniverse/bridle/ctxmap/distill"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/embed"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/extractor"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/render"
@@ -73,6 +74,7 @@ type Engine struct {
 	prop  Proposer
 	judge PairJudge
 	emb   embed.Embedder
+	dist  *distill.Distiller // optional in-harness tool-result distiller
 
 	turns    []turnRec // engine-owned dialogue record (inspect evidence, extractor context)
 	extractQ chan extractReq
@@ -101,6 +103,27 @@ func New(cfg Config, st *store.Store, rend *render.Renderer, prop Proposer, emb 
 	e.wg.Add(1)
 	go e.worker()
 	return e
+}
+
+// SetDistiller wires the in-harness tool-result distiller (optional). When set,
+// DistillToolResult compresses large tool results before the harnessed model
+// sees them, and the read_raw tool is served for escalation.
+func (e *Engine) SetDistiller(d *distill.Distiller) { e.dist = d }
+
+// DistillToolResult is called by the host on each NON-memory tool result before
+// it is fed back to the harnessed model. Large results are compressed by the
+// in-harness model (raw preserved for read_raw). No distiller => raw unchanged.
+func (e *Engine) DistillToolResult(toolName, raw string) string {
+	if e.dist == nil {
+		return raw
+	}
+	focus := ""
+	e.mu.Lock()
+	if n := len(e.turns); n > 0 {
+		focus = e.turns[n-1].user
+	}
+	e.mu.Unlock()
+	return e.dist.Process(toolName, raw, focus)
 }
 
 func (e *Engine) SessionID() string { return e.cfg.SessionID }
@@ -195,7 +218,7 @@ func (e *Engine) WaitExtraction() []string {
 
 // Tools returns the recall/inspect tools for the host to serve to the model.
 func (e *Engine) Tools() []Tool {
-	return []Tool{
+	out := []Tool{
 		{
 			Name:        "recall",
 			Description: "Retrieve OLDER facts from earlier in this conversation that are not shown in the current prompt. Only needed when answering requires context beyond what is visible. Facts are stored automatically; this only reads them.",
@@ -209,6 +232,24 @@ func (e *Engine) Tools() []Tool {
 			Run:         e.runInspect,
 		},
 	}
+	if e.dist != nil {
+		out = append(out, Tool{
+			Name:        "read_raw",
+			Description: "Retrieve the verbatim, un-compressed output of an earlier tool result by its handle. Use when a distilled result omitted a detail you need exactly (a full signature, an exact value, the whole error).",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"handle":{"type":"string"}},"required":["handle"]}`),
+			Run:         e.runReadRaw,
+		})
+	}
+	return out
+}
+
+func (e *Engine) runReadRaw(args json.RawMessage) string {
+	var a struct{ Handle string `json:"handle"` }
+	json.Unmarshal(args, &a)
+	if raw, ok := e.dist.Raw(a.Handle); ok {
+		return raw
+	}
+	return "no such raw handle: " + a.Handle
 }
 
 func (e *Engine) runRecall(args json.RawMessage) string {

@@ -49,6 +49,7 @@ func Attach(h *bridle.Harness, eng *memory.Engine) func() {
 	ids := []bridle.HookID{
 		h.RegisterBeforeModelCall(a.beforeModelCall),
 		h.RegisterBeforeToolCall(a.beforeToolCall),
+		h.RegisterAfterToolCall(a.afterToolCall),
 		h.RegisterOnTurnDone(a.onTurnDone),
 	}
 	return func() {
@@ -113,6 +114,22 @@ func (a *attachment) beforeToolCall(_ context.Context, in bridle.BeforeToolCallC
 	res, _ := json.Marshal(out)
 	in.Deny = true
 	in.Result = res
+	return in, bridle.HookContinue, nil
+}
+
+func (a *attachment) afterToolCall(_ context.Context, in bridle.AfterToolCallCtx) (bridle.AfterToolCallCtx, bridle.HookAction, error) {
+	if _, ours := a.tools[in.Call.Name]; ours {
+		return in, bridle.HookContinue, nil // our own tools return distilled/short results already
+	}
+	if in.Result.Err != "" {
+		return in, bridle.HookContinue, nil // leave errors verbatim
+	}
+	raw := string(in.Result.Result)
+	shown := a.eng.DistillToolResult(in.Call.Name, raw)
+	if shown != raw {
+		b, _ := json.Marshal(shown)
+		in.Result.Result = b
+	}
 	return in, bridle.HookContinue, nil
 }
 

@@ -81,6 +81,24 @@ func (e *Extractor) Propose(current Turn, context []Turn, glossary map[string]st
 	return facts, nil
 }
 
+// Distill compresses a tool result to what matters for the task, keeping
+// identifiers, signatures, values, paths, and errors verbatim. Satisfies
+// distill.Summarizer. Runs on the extraction model (thinking off, no grammar).
+func (e *Extractor) Distill(text, focus string) (string, error) {
+	sys := "You compress a tool result so another AI can work without reading the raw. KEEP every load-bearing token EXACTLY: identifiers, function signatures, type names, file paths, line numbers, config values, error messages, counts. DROP only boilerplate, banners, repetition, and unrelated lines. Output ONLY the compressed result — no preamble, no commentary. Be terse but lossless on the essentials."
+	prompt := "<|im_start|>system\n" + sys + "<|im_end|>\n<|im_start|>user\nTASK CONTEXT: " + focus + "\n\nTOOL RESULT TO COMPRESS:\n" + text + "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+	ctx, err := e.extract.NewContext(8192, e.threads)
+	if err != nil {
+		return "", err
+	}
+	defer ctx.Free()
+	out, _, err := ctx.Generate(prompt, "", 1024)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
 func (e *Extractor) Close() {
 	if e.kind != e.extract {
 		e.kind.Free()

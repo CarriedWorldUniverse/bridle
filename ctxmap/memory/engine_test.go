@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	distillNewPkg "github.com/CarriedWorldUniverse/bridle/ctxmap/distill"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/extractor"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/render"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/store"
@@ -187,4 +188,53 @@ func TestDirectiveConflictFlagsNotResolves(t *testing.T) {
 	}
 	_ = st
 	_ = prop
+}
+
+type engFakeSum struct{}
+
+func (engFakeSum) Distill(text, focus string) (string, error) { return "DISTILLED:" + focus, nil }
+
+func TestEngineDistillAndReadRaw(t *testing.T) {
+	e, _, _ := rig(t)
+	e.SetDistiller(distillNewPkg.New(engFakeSum{}, 50))
+	// record a turn so focus is available
+	e.RecordTurn(1, "find where AssertFact is defined", "looking", nil)
+
+	raw := strings.Repeat("package store; func AssertFact(...) {...}\n", 20) // > 50 chars
+	shown := e.DistillToolResult("Read", raw)
+	if !strings.Contains(shown, "DISTILLED:find where AssertFact") {
+		t.Fatalf("large tool result must be distilled with task focus, got:\n%s", shown)
+	}
+	if !strings.Contains(shown, "read_raw") {
+		t.Fatal("distilled result must advertise read_raw escalation")
+	}
+	// read_raw tool present and returns verbatim
+	var readRaw *Tool
+	for i := range e.Tools() {
+		if e.Tools()[i].Name == "read_raw" {
+			tl := e.Tools()[i]
+			readRaw = &tl
+		}
+	}
+	if readRaw == nil {
+		t.Fatal("read_raw tool must be served when a distiller is set")
+	}
+	i := strings.Index(shown, `handle="`) + len(`handle="`)
+	h := shown[i : i+strings.Index(shown[i:], `"`)]
+	got := readRaw.Run([]byte(`{"handle":"` + h + `"}`))
+	if got != raw {
+		t.Fatalf("read_raw must return verbatim raw; got %d chars want %d", len(got), len(raw))
+	}
+}
+
+func TestNoDistillerNoReadRawTool(t *testing.T) {
+	e, _, _ := rig(t)
+	for _, tl := range e.Tools() {
+		if tl.Name == "read_raw" {
+			t.Fatal("read_raw must not be served without a distiller")
+		}
+	}
+	if got := e.DistillToolResult("Read", strings.Repeat("x", 9000)); got != strings.Repeat("x", 9000) {
+		t.Fatal("no distiller => pass through")
+	}
 }
