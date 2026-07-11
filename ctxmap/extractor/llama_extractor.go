@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/extractor/llama"
 )
@@ -23,7 +24,11 @@ type Extractor struct {
 	extract *llama.Model
 	kind    *llama.Model
 	threads int
+	meter   Meter
 }
+
+// Report returns the internal-model cost meter (backend-invisible; see meter.go).
+func (e *Extractor) Report() MeterReport { return e.meter.report() }
 
 func New(cfg Config) (*Extractor, error) {
 	if cfg.Threads == 0 {
@@ -57,7 +62,10 @@ func (e *Extractor) Propose(current Turn, context []Turn, glossary map[string]st
 	}
 	defer ctx.Free()
 
-	out, _, err := ctx.Generate(buildExtractionPrompt(current, context, glossary), factGrammar, 768)
+	p := buildExtractionPrompt(current, context, glossary)
+	t0 := time.Now()
+	out, gen, err := ctx.Generate(p, factGrammar, 768)
+	e.meter.extract.add(gen, len(p), time.Since(t0))
 	if err != nil {
 		return nil, err
 	}
@@ -92,11 +100,37 @@ func (e *Extractor) Distill(text, focus string) (string, error) {
 		return "", err
 	}
 	defer ctx.Free()
-	out, _, err := ctx.Generate(prompt, "", 1024)
+	t0 := time.Now()
+	out, gen, err := ctx.Generate(prompt, "", 1024)
+	e.meter.distill.add(gen, len(prompt), time.Since(t0))
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(out), nil
+}
+
+// ProposeFromTool extracts durable facts from a tool result (within-turn path).
+// One cheap extraction pass, no kind/source/force second pass — tool facts are
+// MODEL_OBSERVED by construction (the caller sets trust), and the values that
+// matter are literals to preserve verbatim, not utterance-force judgments.
+func (e *Extractor) ProposeFromTool(focus, toolName, text string) ([]FactProposal, error) {
+	ctx, err := e.extract.NewContext(8192, e.threads)
+	if err != nil {
+		return nil, err
+	}
+	defer ctx.Free()
+	p := buildToolPrompt(focus, toolName, text)
+	t0 := time.Now()
+	out, gen, err := ctx.Generate(p, factGrammar, 768)
+	e.meter.extract.add(gen, len(p), time.Since(t0))
+	if err != nil {
+		return nil, err
+	}
+	var facts []FactProposal
+	if err := json.Unmarshal([]byte(out), &facts); err != nil {
+		return nil, fmt.Errorf("tool extractor emitted invalid JSON despite grammar: %w", err)
+	}
+	return facts, nil
 }
 
 func (e *Extractor) Close() {
@@ -204,6 +238,31 @@ func buildExtractionPrompt(current Turn, context []Turn, glossary map[string]str
 	return b.String()
 }
 
+// tool-result extraction prompt — pulls DURABLE STRUCTURE (exact values) from
+// tool output, the facts a coding model needs after the raw output scrolls out.
+const toolSystemPrompt = `You read one TOOL RESULT from an agentic coding session and extract the DURABLE facts the coding model will still need many steps later, AFTER this output has scrolled out of its context. Output ONLY a JSON array of {"statement","kind","source","entities","confidence"}.
+
+EXTRACT (keep every value VERBATIM and EXACT):
+- Specification rules with their exact values: magic bytes, version numbers, endianness, field order, type/opcode tables, checksum rules, units.
+- Function / type / method signatures, and the names + order of their parameters.
+- Named constants and their values; important file paths; a file's role/purpose.
+- A test's expected value or a failure's root cause.
+
+DO NOT extract: transient progress, line-by-line file dumps, boilerplate, banners, anything re-derivable trivially. If nothing durable, output [].
+
+Rules:
+- statement: ONE self-contained declarative sentence, values verbatim (e.g. "The CWLOG frame CRC32 covers the payload bytes only, not the header.").
+- kind: CONSTRAINT for a spec rule/invariant the code MUST obey; OBSERVED for everything else. source: always "assistant". confidence: 0.0-1.0.
+- entities: kebab-case slugs (file names, type names, field names).`
+
+func buildToolPrompt(focus, toolName, text string) string {
+	var b strings.Builder
+	b.WriteString("<|im_start|>system\n" + toolSystemPrompt + "<|im_end|>\n<|im_start|>user\n")
+	fmt.Fprintf(&b, "CURRENT TASK: %s\n\nTOOL: %s\nTOOL RESULT:\n%s<|im_end|>\n", focus, toolName, text)
+	b.WriteString("<|im_start|>assistant\n<think>\n\n</think>\n\n")
+	return b.String()
+}
+
 const pairSystemPrompt = `Two statements about the same topic. Think briefly, then answer with exactly one word:
 - SAME: they assert the same fact (different wording is fine)
 - CONTRADICTS: they cannot both be true (a value, place, or polarity differs) — OR one is a standing rule/constraint and the other asks or intends to violate it
@@ -220,7 +279,9 @@ func (e *Extractor) JudgePair(a, b string) (PairVerdict, error) {
 		return "", err
 	}
 	defer ctx.Free()
-	out, _, err := ctx.Generate(prompt, "", 512)
+	t0 := time.Now()
+	out, gen, err := ctx.Generate(prompt, "", 512)
+	e.meter.pair.add(gen, len(prompt), time.Since(t0))
 	if err != nil {
 		return "", err
 	}
@@ -245,7 +306,9 @@ func (e *Extractor) classifyKindSource(statement string, turn Turn) (string, str
 		return "", "", "", err
 	}
 	defer ctx.Free()
-	out, _, err := ctx.Generate(prompt, "", 512)
+	t0 := time.Now()
+	out, gen, err := ctx.Generate(prompt, "", 512)
+	e.meter.kind.add(gen, len(prompt), time.Since(t0))
 	if err != nil {
 		return "", "", "", err
 	}

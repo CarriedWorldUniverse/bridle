@@ -24,10 +24,23 @@ package adapter
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/memory"
 )
+
+// dbg logs token-decomposition traces to stderr when CTXMAP_DEBUG is set, so a
+// single run can be decomposed into memory-block overhead, memory-tool detours,
+// and distiller savings without a rebuild.
+var dbgOn = os.Getenv("CTXMAP_DEBUG") != ""
+
+func dbg(format string, a ...interface{}) {
+	if dbgOn {
+		fmt.Fprintf(os.Stderr, "[ctxmap-dbg] "+format+"\n", a...)
+	}
+}
 
 type attachment struct {
 	eng   *memory.Engine
@@ -38,11 +51,18 @@ type attachment struct {
 	turnN       int
 	userMsg     string
 	renderedIDs []string
+
+	// within-turn mode (agentic coding): refresh the block every step +
+	// ingest tool results as they stream
+	withinTurn bool
+	baseSys    string // host AppendSystemPrompt before we add the memory section
+	focus      string // retrieval focus for mid-turn refreshes (the task)
+	lastBlock  string // last injected block; refresh the prompt only when it changes
 }
 
 // Attach registers the ctxmap hooks on h and returns a detach func.
 func Attach(h *bridle.Harness, eng *memory.Engine) func() {
-	a := &attachment{eng: eng, tools: map[string]memory.Tool{}}
+	a := &attachment{eng: eng, tools: map[string]memory.Tool{}, withinTurn: eng.WithinTurnEnabled()}
 	for _, t := range eng.Tools() {
 		a.tools[t.Name] = t
 	}
@@ -59,7 +79,10 @@ func Attach(h *bridle.Harness, eng *memory.Engine) func() {
 	}
 }
 
-func (a *attachment) beforeModelCall(_ context.Context, in bridle.BeforeModelCallCtx) (bridle.BeforeModelCallCtx, bridle.HookAction, error) {
+func (a *attachment) beforeModelCall(ctx context.Context, in bridle.BeforeModelCallCtx) (bridle.BeforeModelCallCtx, bridle.HookAction, error) {
+	if a.withinTurn {
+		return a.beforeModelCallWithin(in)
+	}
 	if in.Step != 0 {
 		return in, bridle.HookContinue, nil // in-loop steps append monotonically; nothing to add
 	}
@@ -79,6 +102,8 @@ func (a *attachment) beforeModelCall(_ context.Context, in bridle.BeforeModelCal
 
 	b := a.eng.AssembleBlocks(a.userMsg, a.turnN)
 	a.renderedIDs = b.RenderedIDs
+	dbg("turn=%d block: framing=%dch core=%dch subgraph=%dch (resent every step)",
+		a.turnN, len(b.Framing), len(b.Core), len(b.Subgraph))
 
 	// stable blocks join the system prompt
 	sys := in.Request.AppendSystemPrompt
@@ -103,11 +128,60 @@ func (a *attachment) beforeModelCall(_ context.Context, in bridle.BeforeModelCal
 	return in, bridle.HookContinue, nil
 }
 
+// beforeModelCallWithin keeps the working-memory block in the SYSTEM PROMPT and
+// REFRESHES it every step. The system prompt is never scrolled, so facts placed
+// there don't degrade as the tool loop grows — the whole point of within-turn
+// mode. baseSys (the host's own system prompt) is captured once and the memory
+// section is rebuilt each step from the latest store state (which tool-result
+// ingestion has been populating), so the block never accumulates or goes stale.
+func (a *attachment) beforeModelCallWithin(in bridle.BeforeModelCallCtx) (bridle.BeforeModelCallCtx, bridle.HookAction, error) {
+	if in.Step == 0 {
+		a.turnN++
+		msgs := in.Request.Messages
+		a.userMsg = ""
+		for i := len(msgs) - 1; i >= 0; i-- {
+			if msgs[i].Role == "user" {
+				a.userMsg = msgs[i].Content
+				break
+			}
+		}
+		a.focus = a.userMsg
+		a.baseSys = in.Request.AppendSystemPrompt
+		// maintain epoch consolidation + reuse-credit ids for RecordTurn
+		b := a.eng.AssembleBlocks(a.userMsg, a.turnN)
+		a.renderedIDs = b.RenderedIDs
+		for _, t := range a.eng.Tools() {
+			in.Request.Tools = append(in.Request.Tools, bridle.ToolDef{
+				Name: t.Name, Description: t.Description, InputSchema: t.InputSchema,
+			})
+		}
+	}
+	block := a.eng.WorkingMemoryBlock(a.focus)
+	// Refresh the system prompt ONLY when the block content changed. Rewriting it
+	// every step would bust the prefix cache on every call (my own spec's cache-
+	// stability invariant); facts land rarely, so most steps keep a stable prefix
+	// and only a genuine new fact triggers one re-prefill.
+	if in.Step == 0 || block != a.lastBlock {
+		base := a.baseSys
+		if base != "" {
+			base += "\n\n"
+		}
+		in.Request.AppendSystemPrompt = base + memory.Framing + "\n\n" + block
+		a.lastBlock = block
+		dbg("within step=%d block=%dch (system-prompt REFRESHED)", in.Step, len(block))
+	} else {
+		dbg("within step=%d block=%dch (unchanged, prefix stable)", in.Step, len(block))
+	}
+	return in, bridle.HookContinue, nil
+}
+
 func (a *attachment) beforeToolCall(_ context.Context, in bridle.BeforeToolCallCtx) (bridle.BeforeToolCallCtx, bridle.HookAction, error) {
 	t, ours := a.tools[in.Call.Name]
 	if !ours {
+		dbg("tool HOST  %s", in.Call.Name)
 		return in, bridle.HookContinue, nil
 	}
+	dbg("tool MEM   %s  <- memory-tool detour (map-off never makes this call)", in.Call.Name)
 	// serve from the engine via the deny pattern: harness skips execution
 	// and uses Result as the tool_result
 	out := t.Run(in.Call.Args)
@@ -125,10 +199,20 @@ func (a *attachment) afterToolCall(_ context.Context, in bridle.AfterToolCallCtx
 		return in, bridle.HookContinue, nil // leave errors verbatim
 	}
 	raw := string(in.Result.Result)
+	// within-turn: mine the FULL raw result for durable facts (async) before any
+	// distillation — the extractor should see the real content, not a summary.
+	// Skip write_file: its result echoes what the model just authored (no new
+	// knowledge) and re-mining it would just backlog the extractor.
+	if a.withinTurn && in.Call.Name != "write_file" {
+		a.eng.IngestToolResult(in.Call.Name, raw, a.focus)
+	}
 	shown := a.eng.DistillToolResult(in.Call.Name, raw)
 	if shown != raw {
+		dbg("distill %s  raw=%dch -> shown=%dch (saved %dch)", in.Call.Name, len(raw), len(shown), len(raw)-len(shown))
 		b, _ := json.Marshal(shown)
 		in.Result.Result = b
+	} else if len(raw) > 1500 {
+		dbg("distill %s  raw=%dch -> NOT distilled (passed through)", in.Call.Name, len(raw))
 	}
 	return in, bridle.HookContinue, nil
 }

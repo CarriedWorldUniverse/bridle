@@ -34,6 +34,7 @@ type rawEntry struct {
 type Distiller struct {
 	sum       Summarizer
 	threshold int // chars; results at/under this pass through unchanged
+	skip      map[string]bool
 	mu        sync.Mutex
 	raws      map[string]rawEntry
 }
@@ -44,14 +45,30 @@ func New(sum Summarizer, threshold int) *Distiller {
 	if threshold <= 0 {
 		threshold = 1500
 	}
-	return &Distiller{sum: sum, threshold: threshold, raws: map[string]rawEntry{}}
+	return &Distiller{sum: sum, threshold: threshold, skip: map[string]bool{}, raws: map[string]rawEntry{}}
+}
+
+// SkipTools marks tools whose results must NEVER be distilled — pass-through
+// verbatim regardless of size. Use for tools that return content the model may
+// need byte-exact (file reads, directory listings): lossy compression of source
+// is semantically wrong (measured: a code file compresses ~5% while costing a
+// full local-model call), and the escalation path can't recover an edit made
+// against a summarized file. Compressible report-style output (command output,
+// logs, tracebacks) should NOT be skipped — that is where distilling pays off.
+func (d *Distiller) SkipTools(names ...string) {
+	if d == nil {
+		return
+	}
+	for _, n := range names {
+		d.skip[n] = true
+	}
 }
 
 // Process compresses a tool result if it exceeds the threshold. Returns the
 // text to show the harnessed model. focus is the current task/message so the
 // distillation keeps what's relevant. Fails open: any error returns raw.
 func (d *Distiller) Process(toolName, raw, focus string) string {
-	if d == nil || d.sum == nil || len(raw) <= d.threshold {
+	if d == nil || d.sum == nil || len(raw) <= d.threshold || d.skip[toolName] {
 		return raw
 	}
 	summary, err := d.sum.Distill(raw, focus)

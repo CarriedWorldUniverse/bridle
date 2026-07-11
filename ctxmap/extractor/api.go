@@ -35,6 +35,18 @@ type Turn struct {
 	Assistant string
 }
 
+// ToolProposer extracts durable facts from a tool RESULT rather than dialogue.
+// It is the WITHIN-TURN path for agentic coding: in a long tool loop the
+// load-bearing facts (a spec's exact rules, a function signature, a constant,
+// a file's role) arrive in tool output, not in user/assistant text — and they
+// must be captured mid-turn so they survive after that output scrolls out of
+// the model's raw window. The dialogue Propose path deliberately excludes tool
+// results; this is the deliberate, separate seam for them. A Proposer may also
+// implement this; the engine feature-detects it.
+type ToolProposer interface {
+	ProposeFromTool(focus, toolName, text string) ([]FactProposal, error)
+}
+
 // PairVerdict is the reconciler's judgment of two same-topic statements.
 type PairVerdict string
 

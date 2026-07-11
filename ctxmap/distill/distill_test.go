@@ -53,6 +53,23 @@ func TestLargeResultDistilledWithEscalation(t *testing.T) {
 	}
 }
 
+func TestSkipToolPassesThroughVerbatim(t *testing.T) {
+	fs := &fakeSum{}
+	d := New(fs, 100)
+	d.SkipTools("read_file", "list_files")
+	raw := big(9000)
+	if out := d.Process("read_file", raw, "task"); out != raw {
+		t.Fatal("skipped tool must pass through verbatim, never distilled")
+	}
+	if fs.focus != "" {
+		t.Fatal("skipped tool must not invoke the summariser at all")
+	}
+	// a non-skipped large result still distills
+	if out := d.Process("run_command", raw, "task"); out == raw {
+		t.Fatal("non-skipped large result must still be distilled")
+	}
+}
+
 func TestFailOpenOnSummariserError(t *testing.T) {
 	d := New(&fakeSum{err: errors.New("model down")}, 100)
 	raw := big(500)

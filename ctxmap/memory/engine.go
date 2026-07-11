@@ -76,17 +76,22 @@ type Engine struct {
 	emb   embed.Embedder
 	dist  *distill.Distiller // optional in-harness tool-result distiller
 
-	turns    []turnRec // engine-owned dialogue record (inspect evidence, extractor context)
-	extractQ chan extractReq
-	wg       sync.WaitGroup
-	lastIDs  []string
-	pending  int
+	turns      []turnRec // engine-owned dialogue record (inspect evidence, extractor context)
+	extractQ   chan extractReq
+	wg         sync.WaitGroup
+	lastIDs    []string
+	pending    int
+	withinTurn bool            // ingest tool results + refresh the block mid-turn (agentic coding)
+	ingested   map[uint64]bool // content hashes already mined (skip re-reads)
 }
 
 type extractReq struct {
 	turnN       int
 	renderedIDs []string
+	tool        *toolPayload // non-nil => a within-turn tool-result ingestion
 }
+
+type toolPayload struct{ toolName, text, focus string }
 
 // New creates an engine. prop may be nil (extraction disabled — read-only
 // memory over an existing store). emb/judge may be nil (reconciliation falls
@@ -99,7 +104,7 @@ func New(cfg Config, st *store.Store, rend *render.Renderer, prop Proposer, emb 
 		cfg.SessionID = fmt.Sprintf("ctx_%d", time.Now().UnixMilli())
 	}
 	e := &Engine{cfg: cfg, st: st, rend: rend, prop: prop, emb: emb, judge: judge,
-		extractQ: make(chan extractReq, 64)}
+		extractQ: make(chan extractReq, 64), ingested: map[uint64]bool{}}
 	e.wg.Add(1)
 	go e.worker()
 	return e
@@ -127,6 +132,69 @@ func (e *Engine) DistillToolResult(toolName, raw string) string {
 }
 
 func (e *Engine) SessionID() string { return e.cfg.SessionID }
+
+// EnableWithinTurn turns on within-turn operation: tool results are mined for
+// durable facts as they stream (IngestToolResult), and the host refreshes the
+// working-memory block every step (WorkingMemoryBlock). This is what makes the
+// map engage during a single long agentic turn — the between-turn default
+// assembles once at turn start and is inert inside a coding loop.
+func (e *Engine) EnableWithinTurn() { e.withinTurn = true }
+
+// WithinTurnEnabled reports whether within-turn mode is on (the adapter branches
+// on it: refresh the block at step>0 and ingest tool results).
+func (e *Engine) WithinTurnEnabled() bool { return e.withinTurn }
+
+// IngestToolResult queues a tool result for within-turn fact extraction. Async
+// (same worker as dialogue extraction) so it never blocks the tool loop; facts
+// land a step or two later, which is fine — they are needed after the raw
+// output scrolls out, not immediately. No-op if the proposer can't mine tools.
+// small results carry no durable structure worth a full extraction pass; short
+// enough that a coding model can just re-read them if needed.
+const minIngestChars = 400
+
+func (e *Engine) IngestToolResult(toolName, text, focus string) {
+	if !e.withinTurn || e.prop == nil || len(text) < minIngestChars {
+		return
+	}
+	if _, ok := e.prop.(extractor.ToolProposer); !ok {
+		return
+	}
+	// dedup: a re-read of the same content (identical bytes) has nothing new to
+	// mine — the expensive extraction backlog was dominated by these.
+	h := hash64(toolName + "\x00" + text)
+	e.mu.Lock()
+	if e.ingested[h] {
+		e.mu.Unlock()
+		return
+	}
+	e.ingested[h] = true
+	e.mu.Unlock()
+	select {
+	case e.extractQ <- extractReq{tool: &toolPayload{toolName: toolName, text: text, focus: focus}}:
+		e.mu.Lock()
+		e.pending++
+		e.mu.Unlock()
+	default: // queue full: drop this result's facts rather than block the loop
+	}
+}
+
+// WorkingMemoryBlock renders the current working memory (verified core + facts
+// relevant to focus, including within-turn tool facts) as one string for the
+// host to place in the system prompt and REFRESH each step. Read-only: no
+// RecordRender churn (mid-turn re-injection must not inflate reuse credit).
+func (e *Engine) WorkingMemoryBlock(focus string) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	core := e.rend.RenderCore()
+	sub, _ := e.rend.RenderSubgraph(e.retrieve(focus))
+	var b strings.Builder
+	b.WriteString(core)
+	if strings.TrimSpace(sub) != "" {
+		b.WriteString("\n\n")
+		b.WriteString(sub)
+	}
+	return b.String()
+}
 
 // Close drains the extraction queue and stops the worker.
 func (e *Engine) Close() {
@@ -359,11 +427,70 @@ const (
 func (e *Engine) worker() {
 	defer e.wg.Done()
 	for req := range e.extractQ {
-		e.extractTurn(req.turnN)
+		if req.tool != nil {
+			e.ingestTool(req.tool)
+		} else {
+			e.extractTurn(req.turnN)
+		}
 		e.mu.Lock()
 		e.pending--
 		e.mu.Unlock()
 	}
+}
+
+// ingestTool mines a tool result for durable facts (within-turn path). Facts are
+// MODEL_OBSERVED/PROPOSED with a tool provenance span; a re-read that repeats a
+// fact confirms the existing one (dedup), and a fresher tool observation that
+// contradicts an older one wins (a file IS a live source of truth — the keel
+// rule cuts the other way here: the artifact, not the model, is speaking).
+func (e *Engine) ingestTool(tp *toolPayload) {
+	tprop, ok := e.prop.(extractor.ToolProposer)
+	if !ok {
+		return
+	}
+	props, err := tprop.ProposeFromTool(tp.focus, tp.toolName, capText(tp.text, 4000))
+	if err != nil {
+		return
+	}
+	e.mu.Lock()
+	turn := len(e.turns)
+	e.mu.Unlock()
+	if turn < 1 {
+		turn = 1
+	}
+	var ids []string
+	for _, p := range props {
+		if strings.TrimSpace(p.Statement) == "" {
+			continue
+		}
+		kind := store.Kind(p.Kind)
+		if kind != store.KindConstraint {
+			kind = store.KindObserved
+		}
+		f := store.Fact{
+			Statement: p.Statement, Kind: kind, Trust: store.TrustModelObserved,
+			Confidence: p.Confidence, Entities: p.Entities, SessionID: e.cfg.SessionID,
+			Provenance: []store.Span{{SessionID: e.cfg.SessionID, Turn: turn, Start: 0, End: len(tp.text)}},
+		}
+		if dupID, contraID := e.reconcileScan(p.Statement, p.Entities); dupID != "" {
+			e.st.RecordRender(dupID, turn) // re-read confirms the existing fact
+			continue
+		} else if contraID != "" {
+			if id, err := e.st.AssertFact(f); err == nil {
+				e.st.ResolveContradiction(id, contraID) // fresh tool observation wins
+				ids = append(ids, id)
+				e.saveEmbedding(id, p.Statement)
+			}
+			continue
+		}
+		if id, err := e.st.AssertFact(f); err == nil {
+			ids = append(ids, id)
+			e.saveEmbedding(id, p.Statement)
+		}
+	}
+	e.mu.Lock()
+	e.lastIDs = ids
+	e.mu.Unlock()
 }
 
 func (e *Engine) extractTurn(turnN int) {
@@ -579,6 +706,15 @@ func (e *Engine) saveEmbedding(id, statement string) {
 }
 
 // ---- text helpers ----
+
+func hash64(s string) uint64 {
+	var h uint64 = 14695981039346656037
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= 1099511628211
+	}
+	return h
+}
 
 func capText(s string, max int) string {
 	if len(s) <= max {
