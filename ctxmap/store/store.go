@@ -367,6 +367,19 @@ func (s *Store) QueryEntity(slug string, limit int, sessionID string) ([]*Fact, 
 	return scanFacts(rows)
 }
 
+// All returns every fact in creation order, retracted included — the research/
+// debug view for judging extraction quality (what did the extractor actually
+// mine?). Not a runtime retrieval path; unscoped by design.
+func (s *Store) All() ([]*Fact, error) {
+	rows, err := s.db.Query(`SELECT id,statement,kind,status,stale,pinned,trust,confidence,entities,parents,session_id,created,last_confirmed,render_turns
+		FROM facts ORDER BY created`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanFacts(rows)
+}
+
 // Core returns the core-map population: VERIFIED, not stale, not retracted.
 func (s *Store) Core() ([]*Fact, error) {
 	rows, err := s.db.Query(`SELECT id,statement,kind,status,stale,pinned,trust,confidence,entities,parents,session_id,created,last_confirmed,render_turns

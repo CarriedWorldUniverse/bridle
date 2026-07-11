@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
 	"github.com/CarriedWorldUniverse/bridle/ctxmap/memory"
@@ -55,9 +56,10 @@ type attachment struct {
 	// within-turn mode (agentic coding): refresh the block every step +
 	// ingest tool results as they stream
 	withinTurn bool
-	baseSys    string // host AppendSystemPrompt before we add the memory section
-	focus      string // retrieval focus for mid-turn refreshes (the task)
-	lastBlock  string // last injected block; refresh the prompt only when it changes
+	baseSys    string    // host AppendSystemPrompt before we add the memory section
+	focus      string    // retrieval focus for mid-turn refreshes (the task)
+	lastBlock  string    // last injected block; refresh the prompt only when it changes
+	lastStepAt time.Time // per-step latency tracing (CTXMAP_DEBUG)
 }
 
 // Attach registers the ctxmap hooks on h and returns a detach func.
@@ -135,6 +137,12 @@ func (a *attachment) beforeModelCall(ctx context.Context, in bridle.BeforeModelC
 // section is rebuilt each step from the latest store state (which tool-result
 // ingestion has been populating), so the block never accumulates or goes stale.
 func (a *attachment) beforeModelCallWithin(in bridle.BeforeModelCallCtx) (bridle.BeforeModelCallCtx, bridle.HookAction, error) {
+	if dbgOn {
+		if !a.lastStepAt.IsZero() {
+			dbg("step %d->%d took %.1fs", in.Step-1, in.Step, time.Since(a.lastStepAt).Seconds())
+		}
+		a.lastStepAt = time.Now()
+	}
 	if in.Step == 0 {
 		a.turnN++
 		msgs := in.Request.Messages
@@ -168,7 +176,10 @@ func (a *attachment) beforeModelCallWithin(in bridle.BeforeModelCallCtx) (bridle
 		}
 		in.Request.AppendSystemPrompt = base + memory.Framing + "\n\n" + block
 		a.lastBlock = block
-		dbg("within step=%d block=%dch (system-prompt REFRESHED)", in.Step, len(block))
+		// dump the CONTENT, not just the size — the experiment's quality question
+		// is "are the injected facts the load-bearing ones?", answerable only by
+		// reading what the model was actually given.
+		dbg("within step=%d block=%dch (system-prompt REFRESHED); content:\n----8<----\n%s\n---->8----", in.Step, len(block), block)
 	} else {
 		dbg("within step=%d block=%dch (unchanged, prefix stable)", in.Step, len(block))
 	}
