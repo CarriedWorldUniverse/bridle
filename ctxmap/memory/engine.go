@@ -83,6 +83,28 @@ type Engine struct {
 	pending    int
 	withinTurn bool            // ingest tool results + refresh the block mid-turn (agentic coding)
 	ingested   map[uint64]bool // content hashes already mined (skip re-reads)
+
+	workingState bool       // render the deterministic "where am I" progress block
+	ws           *workState // tool-observed session progress (no extraction)
+}
+
+// workState is the SECOND memory: durable facts (the store) are what the world
+// is; working state is what I have DONE about it — the progress an agent keeps
+// losing under context eviction (which files I edited, what the test last said,
+// my recent steps). Built purely by observing tool calls; no model, no store.
+type workState struct {
+	edited  []string       // files created/edited, in first-touch order
+	editCnt map[string]int // write count per file
+	lastCmd string         // last run_command
+	lastOut string         // its (tail-trimmed) output — usually the test result
+	recent  []string       // rolling last-N tool actions
+}
+
+func (w *workState) pushRecent(s string) {
+	w.recent = append(w.recent, s)
+	if len(w.recent) > 6 {
+		w.recent = w.recent[len(w.recent)-6:]
+	}
 }
 
 type extractReq struct {
@@ -104,7 +126,8 @@ func New(cfg Config, st *store.Store, rend *render.Renderer, prop Proposer, emb 
 		cfg.SessionID = fmt.Sprintf("ctx_%d", time.Now().UnixMilli())
 	}
 	e := &Engine{cfg: cfg, st: st, rend: rend, prop: prop, emb: emb, judge: judge,
-		extractQ: make(chan extractReq, 64), ingested: map[uint64]bool{}}
+		extractQ: make(chan extractReq, 64), ingested: map[uint64]bool{},
+		ws: &workState{editCnt: map[string]int{}}}
 	e.wg.Add(1)
 	go e.worker()
 	return e
@@ -143,6 +166,87 @@ func (e *Engine) EnableWithinTurn() { e.withinTurn = true }
 // WithinTurnEnabled reports whether within-turn mode is on (the adapter branches
 // on it: refresh the block at step>0 and ingest tool results).
 func (e *Engine) WithinTurnEnabled() bool { return e.withinTurn }
+
+// EnableWorkingState turns on the deterministic progress block: the host feeds
+// every host-tool call to ObserveTool and the working-state section is rendered
+// into the refreshed block. Independent of within-turn extraction so the two
+// memories can be tested in isolation (facts-only vs state-only vs both).
+func (e *Engine) EnableWorkingState() { e.workingState = true }
+
+// WorkingStateEnabled reports whether the progress block is on.
+func (e *Engine) WorkingStateEnabled() bool { return e.workingState }
+
+// RefreshMode reports whether the block must be refreshed each step — true if
+// EITHER within-turn extraction or working-state is on (both need the block
+// kept live in the system prompt as the loop runs).
+func (e *Engine) RefreshMode() bool { return e.withinTurn || e.workingState }
+
+// ObserveTool updates the working-state memory from one host-tool call. Pure
+// bookkeeping — deterministic, no model, always fresh. Called by the host on
+// every non-memory tool call.
+func (e *Engine) ObserveTool(toolName string, args json.RawMessage, result string) {
+	if !e.workingState {
+		return
+	}
+	var a struct{ Path, Command string }
+	json.Unmarshal(args, &a)
+	// tool results arrive JSON-encoded (host marshals the string); decode so the
+	// state block shows clean text, not escaped bytes
+	clean := result
+	var s string
+	if json.Unmarshal([]byte(result), &s) == nil {
+		clean = s
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	switch toolName {
+	case "write_file":
+		if a.Path != "" {
+			if e.ws.editCnt[a.Path] == 0 {
+				e.ws.edited = append(e.ws.edited, a.Path)
+			}
+			e.ws.editCnt[a.Path]++
+			e.ws.pushRecent("write_file " + a.Path)
+		}
+	case "run_command":
+		e.ws.lastCmd = a.Command
+		e.ws.lastOut = tailText(clean, 14, 700)
+		e.ws.pushRecent("run_command " + firstWords(a.Command, 6))
+	case "read_file":
+		e.ws.pushRecent("read_file " + a.Path)
+	case "list_files":
+		e.ws.pushRecent("list_files")
+	default:
+		e.ws.pushRecent(toolName)
+	}
+}
+
+// renderWorkingState appends the progress block. Caller holds e.mu.
+func (e *Engine) renderWorkingState(b *strings.Builder) {
+	b.WriteString("\n\n## Working state (auto-tracked — your own progress so far this task)\n")
+	if len(e.ws.edited) == 0 {
+		b.WriteString("Files created/edited: (none yet)\n")
+	} else {
+		parts := make([]string, len(e.ws.edited))
+		for i, p := range e.ws.edited {
+			if n := e.ws.editCnt[p]; n > 1 {
+				parts[i] = fmt.Sprintf("%s (%d×)", p, n)
+			} else {
+				parts[i] = p
+			}
+		}
+		b.WriteString("Files created/edited: " + strings.Join(parts, ", ") + "\n")
+	}
+	if e.ws.lastCmd != "" {
+		b.WriteString("Last command — `" + e.ws.lastCmd + "` — output:\n")
+		for _, line := range strings.Split(e.ws.lastOut, "\n") {
+			b.WriteString("    " + line + "\n")
+		}
+	}
+	if len(e.ws.recent) > 0 {
+		b.WriteString("Recent steps: " + strings.Join(e.ws.recent, " → ") + "\n")
+	}
+}
 
 // IngestToolResult queues a tool result for within-turn fact extraction. Async
 // (same worker as dialogue extraction) so it never blocks the tool loop; facts
@@ -192,6 +296,9 @@ func (e *Engine) WorkingMemoryBlock(focus string) string {
 	if strings.TrimSpace(sub) != "" {
 		b.WriteString("\n\n")
 		b.WriteString(sub)
+	}
+	if e.workingState {
+		e.renderWorkingState(&b)
 	}
 	return b.String()
 }
@@ -706,6 +813,29 @@ func (e *Engine) saveEmbedding(id, statement string) {
 }
 
 // ---- text helpers ----
+
+// tailText keeps the last maxLines lines (and at most maxChars) — test output
+// and errors put the verdict at the end, which is what working state must hold.
+func tailText(s string, maxLines, maxChars int) string {
+	s = strings.TrimRight(s, "\n")
+	lines := strings.Split(s, "\n")
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+	out := strings.Join(lines, "\n")
+	if len(out) > maxChars {
+		out = "…" + out[len(out)-maxChars:]
+	}
+	return out
+}
+
+func firstWords(s string, n int) string {
+	f := strings.Fields(s)
+	if len(f) > n {
+		return strings.Join(f[:n], " ") + " …"
+	}
+	return strings.Join(f, " ")
+}
 
 func hash64(s string) uint64 {
 	var h uint64 = 14695981039346656037

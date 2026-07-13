@@ -55,7 +55,9 @@ type attachment struct {
 
 	// within-turn mode (agentic coding): refresh the block every step +
 	// ingest tool results as they stream
-	withinTurn bool
+	withinTurn bool // refresh the block each step (within-turn extraction OR working-state)
+	ingest     bool // mine tool results for durable facts
+	observe    bool // feed tool calls to the working-state memory
 	baseSys    string    // host AppendSystemPrompt before we add the memory section
 	focus      string    // retrieval focus for mid-turn refreshes (the task)
 	lastBlock  string    // last injected block; refresh the prompt only when it changes
@@ -64,7 +66,8 @@ type attachment struct {
 
 // Attach registers the ctxmap hooks on h and returns a detach func.
 func Attach(h *bridle.Harness, eng *memory.Engine) func() {
-	a := &attachment{eng: eng, tools: map[string]memory.Tool{}, withinTurn: eng.WithinTurnEnabled()}
+	a := &attachment{eng: eng, tools: map[string]memory.Tool{},
+		withinTurn: eng.RefreshMode(), ingest: eng.WithinTurnEnabled(), observe: eng.WorkingStateEnabled()}
 	for _, t := range eng.Tools() {
 		a.tools[t.Name] = t
 	}
@@ -210,11 +213,15 @@ func (a *attachment) afterToolCall(_ context.Context, in bridle.AfterToolCallCtx
 		return in, bridle.HookContinue, nil // leave errors verbatim
 	}
 	raw := string(in.Result.Result)
+	// working-state: deterministic progress tracking from every host-tool call
+	if a.observe {
+		a.eng.ObserveTool(in.Call.Name, in.Call.Args, raw)
+	}
 	// within-turn: mine the FULL raw result for durable facts (async) before any
 	// distillation — the extractor should see the real content, not a summary.
 	// Skip write_file: its result echoes what the model just authored (no new
 	// knowledge) and re-mining it would just backlog the extractor.
-	if a.withinTurn && in.Call.Name != "write_file" {
+	if a.ingest && in.Call.Name != "write_file" {
 		a.eng.IngestToolResult(in.Call.Name, raw, a.focus)
 	}
 	shown := a.eng.DistillToolResult(in.Call.Name, raw)

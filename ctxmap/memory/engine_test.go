@@ -87,6 +87,47 @@ func TestToolsRecallAndInspect(t *testing.T) {
 	_ = st
 }
 
+func TestWorkingStateTracksProgress(t *testing.T) {
+	st, _ := store.Open(":memory:")
+	defer st.Close()
+	rend, _ := render.New(st)
+	e := New(Config{SessionID: "ws"}, st, rend, nil, nil, nil)
+	defer e.Close()
+
+	// disabled by default: no observation, empty block
+	e.ObserveTool("write_file", json.RawMessage(`{"path":"a.py","content":"x"}`), `"ok"`)
+	if b := e.WorkingMemoryBlock("task"); strings.Contains(b, "Working state") {
+		t.Fatal("working-state must be off until enabled")
+	}
+
+	e.EnableWorkingState()
+	if !e.RefreshMode() {
+		t.Fatal("working-state must put the engine in refresh mode")
+	}
+	e.ObserveTool("read_file", json.RawMessage(`{"path":"src/framing.py"}`), `"..."`)
+	e.ObserveTool("write_file", json.RawMessage(`{"path":"src/const.py"}`), `"OK wrote src/const.py"`)
+	e.ObserveTool("write_file", json.RawMessage(`{"path":"src/const.py"}`), `"OK wrote src/const.py"`)
+	// tool result arrives JSON-encoded — the block must show clean text
+	e.ObserveTool("run_command", json.RawMessage(`{"command":"python3 tests/test_codec.py"}`), `"PASS a\nFAIL b: AssertionError\n\n1 FAILED"`)
+
+	b := e.WorkingMemoryBlock("task")
+	for _, want := range []string{
+		"Working state",
+		"src/const.py (2×)",             // edit count tracked
+		"python3 tests/test_codec.py",   // last command
+		"FAIL b: AssertionError",        // decoded test output (not escaped)
+		"1 FAILED",
+		"Recent steps:",
+	} {
+		if !strings.Contains(b, want) {
+			t.Fatalf("working-state block missing %q\n---\n%s", want, b)
+		}
+	}
+	if strings.Contains(b, `\n`) {
+		t.Fatal("tool output must be decoded, not escaped JSON")
+	}
+}
+
 func TestExtractionDisabledDegradesGracefully(t *testing.T) {
 	st, _ := store.Open(":memory:")
 	defer st.Close()
