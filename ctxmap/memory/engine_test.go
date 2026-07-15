@@ -128,6 +128,37 @@ func TestWorkingStateTracksProgress(t *testing.T) {
 	}
 }
 
+func TestBeginTurnIsMonotonicAcrossReattach(t *testing.T) {
+	st, _ := store.Open(":memory:")
+	defer st.Close()
+	rend, _ := render.New(st)
+	e := New(Config{SessionID: "turns"}, st, rend, nil, nil, nil)
+	defer e.Close()
+
+	// simulate two turns under a first "attachment"
+	if n := e.BeginTurn(); n != 1 {
+		t.Fatalf("first turn = %d, want 1", n)
+	}
+	e.RecordTurn(1, "u1", "a1", nil)
+	if n := e.BeginTurn(); n != 2 {
+		t.Fatalf("second turn = %d, want 2", n)
+	}
+	e.RecordTurn(2, "u2", "a2", nil)
+
+	// a harness rebuild + re-attach creates a fresh adapter with turnN=0; the
+	// ENGINE must keep counting so the dialogue record is not overwritten.
+	if n := e.BeginTurn(); n != 3 {
+		t.Fatalf("post-reattach turn = %d, want 3 (engine owns the counter)", n)
+	}
+	e.RecordTurn(3, "u3", "a3", nil)
+	e.mu.Lock()
+	got := len(e.turns)
+	e.mu.Unlock()
+	if got != 3 {
+		t.Fatalf("dialogue record has %d turns, want 3 (no overwrite)", got)
+	}
+}
+
 func TestExtractionDisabledDegradesGracefully(t *testing.T) {
 	st, _ := store.Open(":memory:")
 	defer st.Close()
