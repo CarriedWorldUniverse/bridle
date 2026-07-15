@@ -86,6 +86,8 @@ type Engine struct {
 
 	workingState bool       // render the deterministic "where am I" progress block
 	ws           *workState // tool-observed session progress (no extraction)
+
+	turnCounter int // authoritative turn number (survives adapter re-attach)
 }
 
 // workState is the SECOND memory: durable facts (the store) are what the world
@@ -155,6 +157,19 @@ func (e *Engine) DistillToolResult(toolName, raw string) string {
 }
 
 func (e *Engine) SessionID() string { return e.cfg.SessionID }
+
+// BeginTurn advances and returns the authoritative turn number. The engine —
+// not the adapter — owns it, so a host that rebuilds its harness mid-session
+// (e.g. agentfunnel re-registering a Harness on a binding/JWT refresh) and
+// re-attaches a shared engine keeps a monotonic turn count instead of resetting
+// to 1 and overwriting the dialogue record. Call once per turn, before
+// AssembleBlocks.
+func (e *Engine) BeginTurn() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.turnCounter++
+	return e.turnCounter
+}
 
 // EnableWithinTurn turns on within-turn operation: tool results are mined for
 // durable facts as they stream (IngestToolResult), and the host refreshes the

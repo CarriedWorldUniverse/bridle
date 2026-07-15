@@ -91,7 +91,7 @@ func (a *attachment) beforeModelCall(ctx context.Context, in bridle.BeforeModelC
 	if in.Step != 0 {
 		return in, bridle.HookContinue, nil // in-loop steps append monotonically; nothing to add
 	}
-	a.turnN++
+	a.turnN = a.eng.BeginTurn()
 
 	// the final user message is the turn's input
 	msgs := in.Request.Messages
@@ -147,7 +147,7 @@ func (a *attachment) beforeModelCallWithin(in bridle.BeforeModelCallCtx) (bridle
 		a.lastStepAt = time.Now()
 	}
 	if in.Step == 0 {
-		a.turnN++
+		a.turnN = a.eng.BeginTurn()
 		msgs := in.Request.Messages
 		a.userMsg = ""
 		for i := len(msgs) - 1; i >= 0; i-- {
