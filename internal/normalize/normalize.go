@@ -73,3 +73,35 @@ func OllamaStopReason(raw string) bridle.StopReason {
 		return bridle.StopReasonModelDone
 	}
 }
+
+// ProviderErrorClass maps a bridle ProviderErrorKind onto the 8-value
+// Stream error-class vocabulary (agora-spec-bridle §3, NEX-767 T7). This
+// is the flagged wire→canonical mapping-table home per the blueprint
+// (§8): the four classes bridle's ProviderErrorKind enum doesn't
+// distinguish today — overloaded, context_length, schema, refusal — are
+// per-lane DETECTION work for T3 (a future ProviderErrorKind const, or a
+// dedicated raw-wire check, feeds this table a new case). Until then
+// they fall through the default the same as any other unclassified
+// kind.
+//
+// NOTE: bridle's root package (stream.go) cannot call this function —
+// this package already imports the root bridle package (for the
+// StopReason mappings above), so the root package importing back would
+// be a cycle. Stream's own error{class} derivation therefore duplicates
+// this small switch locally (see stream.go's classifyStreamError).
+// Provider packages (which already import normalize) can call this
+// directly once T3 wires per-lane detection.
+func ProviderErrorClass(kind bridle.ProviderErrorKind) bridle.ErrorClass {
+	switch kind {
+	case bridle.ProviderErrorAuthFailed:
+		return bridle.ErrorClassAuth
+	case bridle.ProviderErrorRateLimit:
+		return bridle.ErrorClassRateLimit
+	case bridle.ProviderErrorNetworkError, bridle.ProviderErrorTimeout, bridle.ProviderErrorTLSError:
+		return bridle.ErrorClassNetwork
+	case bridle.ProviderErrorServerError, bridle.ProviderErrorCrash, bridle.ProviderErrorSubprocessExit, bridle.ProviderErrorConfig:
+		return bridle.ErrorClassProvider
+	default:
+		return bridle.ErrorClassProvider
+	}
+}

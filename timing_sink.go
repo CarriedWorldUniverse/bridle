@@ -62,6 +62,12 @@ func stampEvent(ev Event, ts time.Time) Event {
 	case ModelChunk:
 		e.TS = ts
 		return e
+	case ReasoningChunk:
+		e.TS = ts
+		return e
+	case Warning:
+		e.TS = ts
+		return e
 	case ToolCallStart:
 		e.TS = ts
 		return e

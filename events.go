@@ -17,6 +17,30 @@ type ModelChunk struct {
 	TS   time.Time // stamped by the harness at emission; zero outside a harness turn
 }
 
+// ReasoningChunk carries a streamed extended-thinking/reasoning-content
+// fragment from the model — the reasoning_delta half of the
+// agora-spec-bridle §2 event vocab (ModelChunk covers text_delta).
+// Populated by claude's ThinkingDelta branch and openai's
+// reasoning_content live-emit (both providers extracted this today but
+// never streamed it before NEX-767 T7).
+type ReasoningChunk struct {
+	Text string
+	TS   time.Time // stamped by the harness at emission; zero outside a harness turn
+}
+
+// Warning fires for a non-fatal, once-per-session-worthy condition the
+// harness or a provider wants to surface without failing the turn —
+// e.g. an unsupported effort tier/knob falling back to a default
+// (agora-spec-bridle §3: "Unsupported tier or knob → drop with a
+// warning event once per session"). bridle itself is stateless and
+// emits every time it hits the condition; dedup (once-per-session) is
+// the consumer's job (agora's TUI, per the blueprint's open question 2).
+type Warning struct {
+	Kind    string
+	Message string
+	TS      time.Time // stamped by the harness at emission; zero outside a harness turn
+}
+
 // ToolCallStart fires when the model requests a tool call, before execution.
 type ToolCallStart struct {
 	ID   string
@@ -163,10 +187,38 @@ func IsProviderErrorKind(err error, kind ProviderErrorKind) bool {
 	return false
 }
 
+// ErrorClass is the Stream-facing error taxonomy (agora-spec-bridle §3:
+// "auth | rate_limit | overloaded | context_length | schema | network |
+// refusal | provider"). agora's retry policy keys off the class:
+// rate_limit/overloaded/network are retryable with backoff, auth
+// surfaces immediately, context_length routes to the context manager,
+// refusal is non-retryable content surfaced to the turn/approval layer,
+// provider is the residual "something else went wrong" bucket.
+//
+// T1/T7 adds the TYPE and the mapping-table home (internal/normalize's
+// ProviderErrorClass) so Stream's error{class} event has somewhere to
+// land; per-lane DETECTION of overloaded/context_length/schema/refusal
+// from real wire errors is T3 follow-up work — today's ProviderErrorKind
+// values don't distinguish those four yet.
+type ErrorClass string
+
+const (
+	ErrorClassAuth          ErrorClass = "auth"
+	ErrorClassRateLimit     ErrorClass = "rate_limit"
+	ErrorClassOverloaded    ErrorClass = "overloaded"
+	ErrorClassContextLength ErrorClass = "context_length"
+	ErrorClassSchema        ErrorClass = "schema"
+	ErrorClassNetwork       ErrorClass = "network"
+	ErrorClassRefusal       ErrorClass = "refusal"
+	ErrorClassProvider      ErrorClass = "provider"
+)
+
 func (ModelChunk) event()      {}
+func (ReasoningChunk) event()  {}
 func (ToolCallStart) event()   {}
 func (ToolCallResult) event()  {}
 func (StepBoundary) event()    {}
 func (TurnDone) event()        {}
 func (TurnError) event()       {}
 func (MCPServerFailed) event() {}
+func (Warning) event()         {}

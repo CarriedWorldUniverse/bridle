@@ -162,8 +162,17 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		// captured by Accumulate but not surfaced as ModelChunks — those
 		// would be misinterpreted as model prose.
 		if delta, ok := event.AsAny().(anthropic.ContentBlockDeltaEvent); ok {
-			if td, ok := delta.Delta.AsAny().(anthropic.TextDelta); ok {
-				sink.Emit(bridle.ModelChunk{Text: td.Text})
+			switch d := delta.Delta.AsAny().(type) {
+			case anthropic.TextDelta:
+				sink.Emit(bridle.ModelChunk{Text: d.Text})
+			case anthropic.ThinkingDelta:
+				// NEX-767 T7: stream extended-thinking text live as it
+				// arrives (agora-spec-bridle §2 reasoning_delta). The
+				// accumulated ThinkingBlock (with its signature) is still
+				// captured by Accumulate/extractResult below for
+				// cross-turn round-trip — this is the additional live
+				// emit, not a replacement for it.
+				sink.Emit(bridle.ReasoningChunk{Text: d.Thinking})
 			}
 		}
 	}

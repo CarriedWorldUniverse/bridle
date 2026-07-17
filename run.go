@@ -785,6 +785,7 @@ func addUsage(a, b Usage) Usage {
 		CacheReadInputTokens:     a.CacheReadInputTokens + b.CacheReadInputTokens,
 		CacheCreationInputTokens: a.CacheCreationInputTokens + b.CacheCreationInputTokens,
 		CostUSD:                  a.CostUSD + b.CostUSD,
+		ReasoningTokens:          a.ReasoningTokens + b.ReasoningTokens,
 		// If ANY round contributed an estimated count, the turn total is
 		// approximate — flag it so cost accounting knows not to trust it
 		// as exact.
