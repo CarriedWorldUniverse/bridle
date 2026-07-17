@@ -195,6 +195,18 @@ func (r *Registry) Stream(ctx context.Context, handle ModelHandle, req Request) 
 
 	go func() {
 		defer close(ch)
+		// This goroutine's blast radius is process-wide: Stream is the
+		// seam every model call routes through, so an unrecovered panic
+		// here (a bad Bind, a nil provider, any provider bug — including
+		// one in h.provider.Capabilities() below, which runs before
+		// either dispatch path's own recover boundary) would terminate
+		// the whole process, killing every in-flight turn across every
+		// lane, not just this one. Degrade to an ErrorEvent instead.
+		defer func() {
+			if r := recover(); r != nil {
+				ch <- ErrorEvent{Class: ErrorClassProvider, Err: panicErr(r)}
+			}
+		}()
 
 		caps := h.provider.Capabilities()
 		if caps.Category == CategorySubprocessStream {

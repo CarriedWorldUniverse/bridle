@@ -27,21 +27,52 @@ import "context"
 // from its own Request shape — see stream.go) rather than a TurnRequest,
 // since RunStep skips everything TurnRequest carries for the
 // tool-loop/session/MCP machinery it doesn't run.
-func (h *Harness) RunStep(ctx context.Context, preq ProviderRequest, sink EventSink) (ProviderResult, error) {
+// RunStep has the same recover() boundary Harness.RunTurn has (see
+// harness.go's RunTurn): an unrecovered panic here would otherwise
+// propagate straight out of Registry.Stream's goroutine and crash the
+// whole process — every in-flight turn across every lane, not just the
+// offending one (RunStep/Stream is the seam every model call routes
+// through, so its blast radius is far broader than RunTurn's own
+// panic-isolated funnel path).
+func (h *Harness) RunStep(ctx context.Context, preq ProviderRequest, sink EventSink) (presult ProviderResult, err error) {
 	now := h.clock()
 	ssink := &stampSink{inner: sink, now: now}
 	sink = ssink
 
+	defer func() {
+		if r := recover(); r != nil {
+			e := panicErr(r)
+			// Stamp directly: this emit bypasses ssink's own stamping
+			// (the panic unwound past it), so TS would otherwise be zero.
+			sink.Emit(TurnError{Err: e, Stage: TurnErrorStageHarnessRecover, TS: now()})
+			presult = ProviderResult{}
+			err = e
+		}
+	}()
+
 	var round RoundTiming
-	presult, err := h.runProviderRound(ctx, preq, sink, ssink, now, &round)
+	presult, err = h.runProviderRound(ctx, preq, sink, ssink, now, &round)
 	if err != nil {
-		return ProviderResult{}, err
+		return presult, err
 	}
 
+	// NEX-581 tool-call contract (run.go's enforceToolCallContract doc):
+	// on a retry-round error, this returns the pre-retry presult (the
+	// leak-detected round's already-billed usage/text) rather than a
+	// zeroed ProviderResult — matching RunTurn's "return the partial
+	// result" convention on its own analogous error paths (run.go ~146).
 	presult, err = h.enforceToolCallContract(ctx, preq, presult, sink, ssink, now, &round)
 	if err != nil {
-		return ProviderResult{}, err
+		return presult, err
 	}
+
+	// Usage contract (NEX-581, usage.go): RunTurn normalizes every
+	// round's usage before folding it into the turn total (run.go ~178)
+	// so a completed turn never reports silently-zero usage. RunStep is
+	// single-round, so this is the turn total — apply the same floor
+	// here so the Stream path (which reuses RunStep for direct-api
+	// lanes) holds the same invariant RunTurn does.
+	presult.Usage = normalizeUsage(presult.Usage, promptText(preq), presult.FinalText)
 
 	return presult, nil
 }

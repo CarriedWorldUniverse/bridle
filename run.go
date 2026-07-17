@@ -413,7 +413,14 @@ func (h *Harness) enforceToolCallContract(
 
 	retryResult, err := h.runProviderRound(ctx, retryReq, sink, ssink, now, round)
 	if err != nil {
-		return ProviderResult{}, err
+		// Return the pre-retry presult (the leak-detected round's
+		// already-billed usage/text) rather than a zeroed
+		// ProviderResult — RunStep's caller uses this partial result
+		// (see run_step.go); RunTurn's own error branch only reads err
+		// here (its finalText/allInvocations/totalUsage come from prior
+		// loop rounds, never from this return value), so this change is
+		// a no-op for RunTurn's behavior.
+		return presult, err
 	}
 
 	// Re-run detect→repair on the retried result. Cap at one retry: whatever

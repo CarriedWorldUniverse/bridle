@@ -55,3 +55,62 @@ func TestRunStep_PropagatesProviderError(t *testing.T) {
 		t.Fatal("expected an error, got nil")
 	}
 }
+
+// TestRunStep_RecoversFromPanic proves RunStep has the same recover()
+// boundary RunTurn has: a provider panic degrades to a returned error
+// rather than crashing the process. The test surviving to completion IS
+// the proof — an unrecovered panic would kill the test binary.
+func TestRunStep_RecoversFromPanic(t *testing.T) {
+	provider := fake.NewProvider(fake.Step{Panic: true})
+	h := bridle.NewHarness(provider)
+	sink := &fake.SliceEventSink{}
+
+	_, err := h.RunStep(context.Background(), bridle.ProviderRequest{Model: "fake-model"}, sink)
+	if err == nil {
+		t.Fatal("expected the recovered panic to surface as an error, got nil")
+	}
+}
+
+// TestRunStep_AppliesUsageFloor proves RunStep applies normalizeUsage
+// (the same call RunTurn makes) so a zero-usage turn with non-empty
+// FinalText never surfaces silently-zero usage on the Stream path
+// (usage.go's "usage required" contract).
+func TestRunStep_AppliesUsageFloor(t *testing.T) {
+	provider := fake.NewProvider(fake.Step{Text: "a real answer with content"}) // Usage left zero
+	h := bridle.NewHarness(provider)
+	sink := &fake.SliceEventSink{}
+
+	result, err := h.RunStep(context.Background(), bridle.ProviderRequest{Model: "fake-model"}, sink)
+	if err != nil {
+		t.Fatalf("RunStep: %v", err)
+	}
+	if result.Usage.InputTokens == 0 && result.Usage.OutputTokens == 0 {
+		t.Errorf("Usage = %+v, want a non-zero estimated floor for a turn with content", result.Usage)
+	}
+	if !result.Usage.Estimated {
+		t.Errorf("Usage.Estimated = false, want true (normalizeUsage should flag the estimated floor)")
+	}
+}
+
+// TestRunStep_PreservesPartialResultOnRetryError proves RunStep's error
+// path returns the accumulated ProviderResult (usage/text from the
+// leak-detected round enforceToolCallContract was passed), not a zeroed
+// ProviderResult, when the tool-call-contract's retry round itself
+// errors — matching RunTurn's "return the partial result" convention.
+func TestRunStep_PreservesPartialResultOnRetryError(t *testing.T) {
+	garbage := fake.Step{
+		Text:  "<|channel|><|message|><|end|>", // strips to nothing -> triggers a retry
+		Usage: bridle.Usage{InputTokens: 100, OutputTokens: 50},
+	}
+	p := fake.NewProvider(garbage, fake.Step{Err: context.DeadlineExceeded})
+	h := bridle.NewHarness(p)
+	sink := &fake.SliceEventSink{}
+
+	result, err := h.RunStep(context.Background(), bridle.ProviderRequest{Model: "fake-model"}, sink)
+	if err == nil {
+		t.Fatal("expected the retry round's error to propagate")
+	}
+	if result.Usage.InputTokens != 100 || result.Usage.OutputTokens != 50 {
+		t.Errorf("Usage = %+v, want the partial (garbage-round) usage 100/50 preserved, not zeroed", result.Usage)
+	}
+}

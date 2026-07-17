@@ -190,3 +190,48 @@ func TestStream_UnboundLane(t *testing.T) {
 		t.Fatal("expected an error streaming against an unbound lane, got nil")
 	}
 }
+
+// TestStream_RecoversFromProviderPanic proves Stream's spawned goroutine
+// has its own recover boundary: a provider panic (here, inside RunStep's
+// underlying RunTurn call, on the direct-api dispatch path) must yield an
+// ErrorEvent and a closed channel, NOT crash the process. The test
+// surviving to completion IS the proof — an unrecovered panic would kill
+// the test binary, not just fail an assertion.
+func TestStream_RecoversFromProviderPanic(t *testing.T) {
+	provider := fake.NewProvider(fake.Step{Panic: true})
+	h := bridle.NewHarness(provider)
+
+	r := bridle.NewRegistry()
+	if err := r.Bind("claude-api", h); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	handle, err := r.Resolve("claude-api/claude-sonnet-5", "")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	ch, err := r.Stream(context.Background(), handle, bridle.Request{
+		Messages: []bridle.RoleMessage{{Role: bridle.MessageRoleUser, Content: "trigger the panic"}},
+	})
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	events := drainStream(ch)
+
+	if len(events) != 1 {
+		t.Fatalf("got %d events, want 1 (a single ErrorEvent, no partial tool_call/usage/done): %+v", len(events), events)
+	}
+	errEv, ok := events[0].(bridle.ErrorEvent)
+	if !ok {
+		t.Fatalf("events[0] = %#v, want ErrorEvent", events[0])
+	}
+	if errEv.Err == nil {
+		t.Errorf("ErrorEvent.Err is nil, want the recovered panic wrapped as an error")
+	}
+	// Channel must actually be closed (drainStream only returns once
+	// closed, but assert explicitly too — a second receive must report
+	// !ok, not block).
+	if _, stillOpen := <-ch; stillOpen {
+		t.Error("channel still open after the terminal ErrorEvent")
+	}
+}
