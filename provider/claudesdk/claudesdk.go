@@ -514,6 +514,17 @@ func (p *Provider) serviceToolCall(ctx context.Context, ev sidecarEvent, req bri
 			Kind:    bridle.ProviderErrorConfig,
 			Message: "claudesdk: sidecar requested a custom tool call but no ToolExecutor is configured",
 		}
+		// Self-healing (NEX-745 review gate, LOW/MED): write an ERROR
+		// tool_result back to the sidecar's stdin so its tool() handler's
+		// pending promise resolves. Without this, the sidecar awaits a
+		// reply that never arrives — no "done" event ever follows, and
+		// pumpEvents (and RunTurn) never returns on its own, only via an
+		// external ctx cancellation (and even then the real cause here
+		// gets masked behind a plain "aborted" result). This is only
+		// reachable via caller misconfig (run.go always wires a
+		// ToolExecutor for this provider), but self-healing keeps a
+		// misconfigured turn from wedging the caller.
+		writeToolResultError(ev.ID, state.providerErr.Message, stdin)
 		return
 	}
 
@@ -554,6 +565,27 @@ func (p *Provider) serviceToolCall(ctx context.Context, ev sidecarEvent, req bri
 	if _, writeErr := stdin.Write(append(line, '\n')); writeErr != nil {
 		state.providerErr = &bridle.ProviderError{Kind: bridle.ProviderErrorSubprocessExit, Message: "claudesdk: write tool_result: " + writeErr.Error()}
 	}
+}
+
+// writeToolResultError writes an is_error:true tool_result for id back
+// to the sidecar's stdin, best-effort — used to unblock the sidecar's
+// pending tool() handler when bridle can't actually service the call
+// (see serviceToolCall's nil-ToolExecutor branch). A marshal/write
+// failure here is silently swallowed: the caller already has a terminal
+// state.providerErr set for the real cause, and this is purely a
+// best-effort courtesy to let the sidecar exit cleanly rather than hang.
+func writeToolResultError(id, message string, stdin io.Writer) {
+	reply := sidecarToolResult{
+		Type:    "tool_result",
+		ID:      id,
+		IsError: true,
+		Content: json.RawMessage(`"` + jsonEscape(message) + `"`),
+	}
+	line, err := json.Marshal(reply)
+	if err != nil {
+		return
+	}
+	_, _ = stdin.Write(append(line, '\n'))
 }
 
 // jsonEscape is a minimal string escaper for folding a Go error string

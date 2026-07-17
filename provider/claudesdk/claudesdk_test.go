@@ -222,6 +222,54 @@ echo '{"type":"done","stop_reason":"end_turn"}'
 	}
 }
 
+// --- LOW/MED (NEX-745 review gate) — a nil ToolExecutor must NOT hang
+// the sidecar. serviceToolCall used to set state.providerErr and return
+// WITHOUT writing any tool_result back to the sidecar's stdin on a nil
+// ToolExecutor. The sidecar's tool() handler (index.ts) awaits that
+// result forever, so no `done`/exit ever follows and pumpEvents (and
+// RunTurn) never returns cleanly on its own — only an external ctx
+// cancellation (via WatchCancelGroup, after its own grace window) ever
+// unwedges it, and even then the turn surfaces as StopReasonAborted
+// with a nil error rather than the real config error, hiding the actual
+// cause. This is only reachable via caller misconfig (run.go always
+// wires a ToolExecutor for this provider), but violates the round-trip
+// invariant. Bounded by ctx's own timeout so this test fails fast
+// rather than hanging the suite if the fix regresses.
+
+func TestClaudeSDK_ServiceToolCall_NilExecutor_NoHang(t *testing.T) {
+	sidecar := writeFakeSidecar(t, `
+echo '{"type":"tool_call","id":"call-1","name":"echo","args":{}}'
+read tool_result_line
+echo '{"type":"done","stop_reason":"end_turn"}'
+`)
+	p := &claudesdk.Provider{SidecarPath: sidecar, Mode: claudesdk.ModeFunnel}
+	sink := &fake.SliceEventSink{}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// req.ToolExecutor deliberately left nil — the misconfig this test
+	// targets. p.RunTurn is called directly (not through the harness,
+	// which always wires one) to isolate the provider's own behavior.
+	start := time.Now()
+	_, err := p.RunTurn(ctx, bridle.ProviderRequest{
+		Model:    "claude-fake",
+		Messages: []bridle.ProviderMessage{{Role: "user", Content: "hi"}},
+		Tools:    []bridle.ToolDef{{Name: "echo", Description: "echo", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+	}, sink)
+	elapsed := time.Since(start)
+
+	if elapsed >= 3*time.Second {
+		t.Fatalf("RunTurn took %s and only returned via ctx's own timeout — the sidecar hung waiting for a tool_result that was never written", elapsed)
+	}
+	if err == nil {
+		t.Fatal("expected an error for a nil ToolExecutor, got nil (turn should fail cleanly, not silently succeed or abort)")
+	}
+	if !bridle.IsProviderErrorKind(err, bridle.ProviderErrorConfig) {
+		t.Errorf("err = %v; want ProviderErrorKind config", err)
+	}
+}
+
 // --- §10.4: SIGTERM mid-turn -> partial ProviderResult, no orphan process.
 
 func TestClaudeSDK_KillMidTurn_NoOrphan(t *testing.T) {
