@@ -115,9 +115,22 @@ func (p *Provider) Name() bridle.ProviderID { return providerID }
 
 func (p *Provider) Capabilities() bridle.ProviderCapabilities {
 	return bridle.ProviderCapabilities{
-		Category:               bridle.CategorySubprocessStream,
-		SupportsCustomTools:    true, // THE point of this lane
-		SupportsBeforeToolCall: true, // via SDK canUseTool
+		Category:            bridle.CategorySubprocessStream,
+		SupportsCustomTools: true, // THE point of this lane
+		// SupportsBeforeToolCall is HONEST per mode (NEX-745 review gate,
+		// MED — "dead gate" finding): index.ts's canUseTool
+		// unconditionally allows and never reads before_tool_call_gate,
+		// so a BeforeToolCall hook can NEVER veto a native (ModeAgent)
+		// Claude Code tool call — only bridle-custom calls (serviced via
+		// ToolExecutor/executeToolCall) get a real hook fire. In
+		// ModeFunnel every tool call IS a custom call (native tools are
+		// entirely off), so true is accurate there; in ModeAgent native
+		// tools are live and ungated, so advertising true would mislead
+		// a caller into trusting a veto that can't happen. See
+		// bridle-claude-sidecar/README.md's "canUseTool always
+		// default-allows" note and wire.go's BeforeToolCallGate doc for
+		// the same caveat from the wire-protocol side.
+		SupportsBeforeToolCall: p.Mode != ModeAgent,
 		SupportsAfterToolCall:  true, // custom calls: real hook fire via ToolExecutor/executeToolCall; native_tool observations: sink-only (see below)
 		SupportsMCP:            false,
 	}

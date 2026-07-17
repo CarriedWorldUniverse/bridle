@@ -39,6 +39,31 @@ func writeFakeSidecar(t *testing.T, body string) string {
 	return path
 }
 
+// --- MED (NEX-745 review gate, BOTH reviewers) — SupportsBeforeToolCall
+// must not LIE about ModeAgent's native tools. index.ts's canUseTool
+// unconditionally allows and never reads before_tool_call_gate, so a
+// BeforeToolCall hook can NEVER veto a native (ModeAgent) Claude Code
+// tool call — only bridle-custom tools (via ToolExecutor) get real
+// gating. In ModeFunnel, native tools are entirely OFF (Claude sees
+// only bridle-defined tools), so every tool call IS a custom call and
+// IS really gated — SupportsBeforeToolCall:true is honest there. The
+// capability must reflect that split rather than blanket-claiming true
+// for a mode where it demonstrably isn't (a caller that relies on the
+// capability to decide whether a BeforeToolCall veto is trustworthy
+// would be misled in ModeAgent).
+
+func TestClaudeSDK_Capabilities_BeforeToolCallHonestPerMode(t *testing.T) {
+	funnel := (&claudesdk.Provider{Mode: claudesdk.ModeFunnel}).Capabilities()
+	if !funnel.SupportsBeforeToolCall {
+		t.Error("ModeFunnel: SupportsBeforeToolCall should be true — every tool call in funnel mode is a bridle-custom call, really gated via ToolExecutor")
+	}
+
+	agent := (&claudesdk.Provider{Mode: claudesdk.ModeAgent}).Capabilities()
+	if agent.SupportsBeforeToolCall {
+		t.Error("ModeAgent: SupportsBeforeToolCall should be false — native tools are enabled and canUseTool unconditionally allows them; a BeforeToolCall hook can never veto a native call in this mode, so advertising true would be dishonest")
+	}
+}
+
 // --- §10.1 (shape): funnel-mode custom tool round trip through the
 // REAL harness — the same ProviderRequest.ToolExecutor wiring run.go
 // installs for any live caller (NEX-745 §4), not a hand-built stand-in.

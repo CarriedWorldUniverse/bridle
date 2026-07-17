@@ -52,12 +52,21 @@ type sidecarInit struct {
 	DisallowedTools []string         `json:"disallowed_tools,omitempty"`
 	Tools           []sidecarToolDef `json:"tools,omitempty"`
 
-	// BeforeToolCallGate, when true, tells the sidecar to forward every
-	// permission decision through canUseTool to bridle-observed gating
-	// rather than defaulting to allow (spec §5 canUseTool). v1 always
-	// sends true when the caller's capabilities advertise
-	// SupportsBeforeToolCall (which claudesdk always does) — default
-	// allow still applies unless a BeforeToolCall hook denies.
+	// BeforeToolCallGate is currently a DEAD/reserved field (NEX-745
+	// review gate, MED — "dead gate" finding): v1's index.ts canUseTool
+	// does NOT read it — canUseTool unconditionally allows every native
+	// tool call regardless of this value. Bridle's real BeforeToolCall
+	// enforcement for CUSTOM tools happens entirely on the Go side, via
+	// the tool_call/tool_result round trip serviced by
+	// req.ToolExecutor -> Harness.executeToolCall — this field plays no
+	// part in that path either. It is sent (always true) as a forward-
+	// compatible placeholder for a FUTURE canUseTool->bridle round trip
+	// that would let a BeforeToolCall hook veto a native (ModeAgent)
+	// tool call; that round trip does not exist yet. See
+	// claudesdk.go's Capabilities() (SupportsBeforeToolCall is false in
+	// ModeAgent precisely because this field doesn't do anything there)
+	// and bridle-claude-sidecar/README.md's "canUseTool always
+	// default-allows" note.
 	BeforeToolCallGate bool `json:"before_tool_call_gate"`
 
 	// ExtraOpts is passed through to `options` verbatim, for opts this

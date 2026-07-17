@@ -68,13 +68,21 @@ never mid-turn.
   not enabled). This mirrors `claudecode`'s own per-block granularity
   (`EmitAssistantText` per text content block in `claudecode.go`), not a
   new corner cut for this lane.
-- **`canUseTool` always default-allows.** The SDK's native-tool
-  permission gate is a separate mechanism from bridle's own
-  `BeforeToolCall` hook, which fires authoritatively on bridle's side of
-  the custom-tool round trip (`provider/claudesdk`'s `ToolExecutor` path
-  → `Harness.executeToolCall`). `SupportsBeforeToolCall: true` is honest
-  for bridle-defined tools; it does not currently give bridle a second
-  opinion on the SDK's own native-tool permission decisions.
+- **`canUseTool` always default-allows and ignores
+  `before_tool_call_gate`.** The SDK's native-tool permission gate is a
+  separate mechanism from bridle's own `BeforeToolCall` hook, which
+  fires authoritatively on bridle's side of the custom-tool round trip
+  (`provider/claudesdk`'s `ToolExecutor` path →
+  `Harness.executeToolCall`). It does not currently give bridle a
+  second opinion on the SDK's own native-tool permission decisions —
+  `before_tool_call_gate` is sent on the wire but unread here, a
+  forward-compatible placeholder for a future round trip that doesn't
+  exist yet. Because of this, `Capabilities().SupportsBeforeToolCall` is
+  **mode-dependent**, not a blanket `true`: `ModeFunnel` (all tool calls
+  are bridle-custom, really gated) advertises `true`; `ModeAgent`
+  (native tools live and ungated) advertises `false`, so a caller can't
+  be misled into trusting a veto of a native call that can never
+  happen.
 - **Cancellation is SIGTERM-only from the Go side.** The wire protocol
   defines an in-band `interrupt` message (honoured if a caller sends one
   — see `main()`'s inbound line router) but `provider/claudesdk`'s Go
