@@ -1,0 +1,334 @@
+# registry_models.toml — static, compiled-in model catalog (T1/T7 facade
+# skeleton, NEX-767). ONLY the 7 core lanes get rows: claude-api,
+# claude-code, claude-sdk, openai, deepseek, gemini-api, bedrock, ollama.
+# An uncataloged lane errors "not cataloged" at Registry.Resolve — that IS
+# the core-lanes-only enforcement (no separate allowlist needed).
+#
+# Model release properties belong under code-review discipline (this
+# file, reviewed via PR), not runtime strings.
+#
+# ⚠ VERIFY BEFORE RELYING ON FOR BILLING/BUDGETING: context_window,
+# max_output_tokens, and pricing below are BEST-EFFORT values authored
+# 2026-07-17 by the facade builder — several are educated-guess
+# placeholders (flagged per-row below and in the builder's PR report),
+# not confirmed against current provider docs. Aliases are NOT baked in
+# here (agora-config-sourced via Registry.RegisterAlias).
+
+# ---------------------------------------------------------------------
+# claude-api — direct Anthropic Messages API
+# ---------------------------------------------------------------------
+
+[[model]]
+lane = "claude-api"
+id = "claude-opus-4-8"
+provider = "claude-api"
+context_window = 200000
+max_output_tokens = 32000
+[model.capabilities]
+tools = true
+parallel_tools = true
+streaming = true
+reasoning_effort = true
+structured_output = false
+prompt_caching = true
+vision = true
+system_prompt_mode = "append"
+[model.pricing] # GUESS — verify against current Anthropic pricing page
+in = 15.0
+out = 75.0
+cached = 1.5
+
+[[model]]
+lane = "claude-api"
+id = "claude-sonnet-5"
+provider = "claude-api"
+context_window = 200000
+max_output_tokens = 64000
+[model.capabilities]
+tools = true
+parallel_tools = true
+streaming = true
+reasoning_effort = true
+structured_output = false
+prompt_caching = true
+vision = true
+system_prompt_mode = "append"
+[model.pricing] # GUESS — verify against current Anthropic pricing page
+in = 3.0
+out = 15.0
+cached = 0.3
+
+[[model]]
+lane = "claude-api"
+id = "claude-fable-5"
+provider = "claude-api"
+# GUESS — Fable 5 is a fast/cheap tier per agora-spec-bridle §3
+# ("Fable 5 thinking is always-on — omit the param"); numeric context
+# window/pricing below are placeholders pending operator verification.
+context_window = 200000
+max_output_tokens = 16000
+[model.capabilities]
+tools = true
+parallel_tools = true
+streaming = true
+reasoning_effort = true # always-on thinking; effort param omitted per §3 (T2 follow-up)
+structured_output = false
+prompt_caching = true
+vision = true
+system_prompt_mode = "append"
+[model.pricing] # GUESS
+in = 0.8
+out = 4.0
+cached = 0.08
+
+# ---------------------------------------------------------------------
+# claude-code — subprocess-stream CLI (self-executing tool loop)
+# ---------------------------------------------------------------------
+
+[[model]]
+lane = "claude-code"
+id = "claude-opus-4-8"
+provider = "claude-code"
+context_window = 200000
+max_output_tokens = 32000
+[model.capabilities]
+tools = true          # tool_use surfaces via ToolInvocation records; CLI executes, not bridle
+parallel_tools = true
+streaming = true
+reasoning_effort = true
+structured_output = false
+prompt_caching = true
+vision = true
+# "append" is agora POLICY (preserve claude-code's built-in prompt), not a
+# hard gate — the CLI genuinely supports both --system-prompt and
+# --append-system-prompt (v2.1.177+).
+system_prompt_mode = "append"
+
+[[model]]
+lane = "claude-code"
+id = "claude-sonnet-5"
+provider = "claude-code"
+context_window = 200000
+max_output_tokens = 64000
+[model.capabilities]
+tools = true
+parallel_tools = true
+streaming = true
+reasoning_effort = true
+structured_output = false
+prompt_caching = true
+vision = true
+system_prompt_mode = "append"
+
+# ---------------------------------------------------------------------
+# claude-sdk — NEX-745 (parallel branch), placeholder rows only.
+# Provider const + real Bind() wiring land there; zero registry changes
+# needed on that side per the blueprint ("claude-sdk needs ZERO registry
+# changes"). ProviderID literal "claude-sdk" is a placeholder string —
+# it is NOT a bridle.ProviderID const yet (that const is NEX-745's).
+# ---------------------------------------------------------------------
+
+[[model]]
+lane = "claude-sdk"
+id = "claude-sonnet-5"
+provider = "claude-sdk" # placeholder ProviderID string, pending NEX-745's real const
+context_window = 200000
+max_output_tokens = 64000
+[model.capabilities]
+tools = true
+parallel_tools = true
+streaming = true
+reasoning_effort = true
+structured_output = false
+prompt_caching = true
+vision = true
+system_prompt_mode = "append"
+
+# ---------------------------------------------------------------------
+# openai — direct OpenAI Chat Completions API
+# ---------------------------------------------------------------------
+
+[[model]]
+lane = "openai"
+id = "gpt-5.1"
+provider = "openai-api"
+# GUESS — model name/numbers per current-era OpenAI naming convention;
+# verify against OpenAI's model docs before relying on these for
+# budgeting.
+context_window = 400000
+max_output_tokens = 64000
+[model.capabilities]
+tools = true
+parallel_tools = true
+streaming = true
+reasoning_effort = true
+structured_output = true # native json_schema strict mode
+prompt_caching = true
+vision = true
+system_prompt_mode = "full"
+[model.pricing] # GUESS
+in = 3.5
+out = 14.0
+cached = 0.35
+
+[[model]]
+lane = "openai"
+id = "gpt-5.1-mini"
+provider = "openai-api"
+context_window = 400000
+max_output_tokens = 32000
+[model.capabilities]
+tools = true
+parallel_tools = true
+streaming = true
+reasoning_effort = true
+structured_output = true
+prompt_caching = true
+vision = true
+system_prompt_mode = "full"
+[model.pricing] # GUESS
+in = 0.4
+out = 1.6
+cached = 0.04
+
+# ---------------------------------------------------------------------
+# deepseek — same Go Provider as openai (openai.go pointed at
+# api.deepseek.com); this is the structural reason LaneID exists below
+# ProviderID (both rows above/below share provider = "openai-api").
+# ---------------------------------------------------------------------
+
+[[model]]
+lane = "deepseek"
+id = "deepseek-chat"
+provider = "openai-api"
+context_window = 128000
+max_output_tokens = 8000
+[model.capabilities]
+tools = true
+parallel_tools = true
+streaming = true
+reasoning_effort = false # binary thinking toggle, not a graded ladder — see reasoner row
+structured_output = false # DeepSeek-aware provider degrades json_schema -> json_object (provider/openai/deepseek.go)
+prompt_caching = true
+vision = false
+system_prompt_mode = "full"
+[model.pricing] # GUESS — verify against current DeepSeek pricing
+in = 0.28
+out = 0.42
+cached = 0.028
+
+[[model]]
+lane = "deepseek"
+id = "deepseek-reasoner"
+provider = "openai-api"
+context_window = 128000
+max_output_tokens = 8000
+[model.capabilities]
+tools = true
+parallel_tools = true
+streaming = true
+reasoning_effort = true # binary on/off toggle (agora-spec-bridle §3), not a graded ladder — T2 maps agora's ladder onto this toggle
+structured_output = false
+prompt_caching = true
+vision = false
+system_prompt_mode = "full"
+[model.pricing] # GUESS
+in = 0.55
+out = 2.19
+cached = 0.14
+
+# ---------------------------------------------------------------------
+# gemini-api — direct Gemini API
+# ---------------------------------------------------------------------
+
+[[model]]
+lane = "gemini-api"
+id = "gemini-3-pro"
+provider = "gemini-api"
+# GUESS — naming/numbers per current-era Gemini convention; verify.
+context_window = 1000000
+max_output_tokens = 65536
+[model.capabilities]
+tools = true
+parallel_tools = true
+streaming = true
+reasoning_effort = true
+structured_output = true # native responseSchema, currently unused by bridle (T4 follow-up honors it)
+prompt_caching = true
+vision = true
+system_prompt_mode = "full"
+[model.pricing] # GUESS
+in = 2.5
+out = 10.0
+cached = 0.25
+
+[[model]]
+lane = "gemini-api"
+id = "gemini-3-flash"
+provider = "gemini-api"
+context_window = 1000000
+max_output_tokens = 65536
+[model.capabilities]
+tools = true
+parallel_tools = true
+streaming = true
+reasoning_effort = true
+structured_output = true
+prompt_caching = true
+vision = true
+system_prompt_mode = "full"
+[model.pricing] # GUESS
+in = 0.15
+out = 0.6
+cached = 0.015
+
+# ---------------------------------------------------------------------
+# bedrock — AWS Bedrock Converse API (Anthropic models via Bedrock)
+# ---------------------------------------------------------------------
+
+[[model]]
+lane = "bedrock"
+id = "anthropic.claude-sonnet-5-v1"
+provider = "bedrock"
+# GUESS — Bedrock model-id granularity is an open blueprint question
+# (inference-profile ARNs vs plain model ids); this row uses the plain
+# form. Verify the exact Bedrock model-id/inference-profile string
+# before relying on it to actually invoke.
+context_window = 200000
+max_output_tokens = 64000
+[model.capabilities]
+tools = true
+parallel_tools = true
+streaming = true
+reasoning_effort = true
+structured_output = false # bedrock forces single-tool-call+validate for structured output (T4 follow-up)
+prompt_caching = true
+vision = true
+system_prompt_mode = "append"
+[model.pricing] # GUESS
+in = 3.0
+out = 15.0
+cached = 0.3
+
+# ---------------------------------------------------------------------
+# ollama — local inference (representative gemma row; ollama serves
+# whatever model is locally pulled, so this is illustrative, not
+# exhaustive)
+# ---------------------------------------------------------------------
+
+[[model]]
+lane = "ollama"
+id = "gemma3:27b"
+provider = "ollama-local"
+context_window = 128000
+max_output_tokens = 8192
+[model.capabilities]
+tools = true
+parallel_tools = false
+streaming = true
+reasoning_effort = false
+structured_output = false
+prompt_caching = false
+vision = true
+system_prompt_mode = "full"
+# No pricing table — local inference has no per-token cost; Pricing stays nil.
