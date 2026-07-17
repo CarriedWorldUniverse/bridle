@@ -40,15 +40,15 @@ type Provider interface {
 // message format, tools are translated to provider-specific schema, and
 // inbox items are folded in.
 type ProviderRequest struct {
-	AspectID     string
+	AspectID           string
 	AppendSystemPrompt string
-	Session      SessionHandle  // for subprocess-stream: resume key; for direct-api: may be empty
-	Messages     []ProviderMessage
-	Tools        []ToolDef
-	ToolChoice   string            // see TurnRequest.ToolChoice
-	MCP          *MCPClientConfig  // nil = no MCP tools
-	MaxSteps     int
-	Model        string
+	Session            SessionHandle // for subprocess-stream: resume key; for direct-api: may be empty
+	Messages           []ProviderMessage
+	Tools              []ToolDef
+	ToolChoice         string           // see TurnRequest.ToolChoice
+	MCP                *MCPClientConfig // nil = no MCP tools
+	MaxSteps           int
+	Model              string
 
 	// Cwd is the working directory for subprocess-style providers (see
 	// TurnRequest.Cwd). Empty falls through to bridle's host cwd. Direct-
@@ -60,6 +60,16 @@ type ProviderRequest struct {
 	// direct-API providers read it as auth/base-url config. Empty/nil =
 	// provider uses its own default config.
 	ProviderEnv map[string]string
+
+	// ToolExecutor is harness-owned (bridle spec NEX-745 §4): the
+	// harness's own ToolRunner-backed tool-execution pipeline, wired in
+	// for subprocess-stream providers whose agentic loop runs mid-
+	// RunTurn and therefore can't wait for run.go's per-round tool loop
+	// to service a custom tool call (claudesdk today). Nil for every
+	// other provider — direct-api providers already own the loop in
+	// run.go and ignore this field; subprocess-stream providers that
+	// don't support custom tools (claudecode) never receive one.
+	ToolExecutor ToolExecutor
 
 	// Sampling + output control — see TurnRequest field docs.
 	// NEX-299 Pass 2. Providers honour what their wire format supports

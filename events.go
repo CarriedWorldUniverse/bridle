@@ -135,6 +135,14 @@ const (
 	// IsProviderErrorKind to handle the generic-failure case
 	// distinctly from the more specific classes above.
 	ProviderErrorSubprocessExit ProviderErrorKind = "subprocess_exit"
+	// ProviderErrorRefusal is a model-level safety refusal (the engine
+	// declined to continue the turn) rather than a transport/auth/rate
+	// failure. Distinct so callers don't retry a refusal the way they'd
+	// retry a transient error — re-sending the same turn to the same
+	// model is very unlikely to produce a different outcome. Surfaced by
+	// claudesdk when the Agent SDK reports stop_reason "refusal" (bridle
+	// spec NEX-745 §7).
+	ProviderErrorRefusal ProviderErrorKind = "refusal"
 )
 
 // ProviderError is a classified provider-level error.

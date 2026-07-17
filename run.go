@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/CarriedWorldUniverse/bridle/internal/mcpclient"
@@ -61,6 +62,21 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 
 	// Lower TurnRequest → ProviderRequest.
 	preq := lowerRequest(req)
+
+	// NEX-745 §4: wire a ToolExecutor for subprocess-stream providers
+	// whose agentic loop runs mid-RunTurn (claudesdk) — the sidecar
+	// reports a custom tool call from INSIDE the provider's single
+	// RunTurn invocation and must service it there, not wait for
+	// run.go's per-round tool loop below. The adapter delegates to
+	// h.executeToolCall, the exact path direct-api providers use, so
+	// hooks/sink events fire identically. Every other provider gets a
+	// nil ToolExecutor and is unaffected: direct-api providers own their
+	// tool loop in this file and never read the field; subprocess-
+	// stream providers that don't support custom tools (claudecode)
+	// don't request one either.
+	if caps.Category == CategorySubprocessStream && caps.SupportsCustomTools {
+		preq.ToolExecutor = &toolExecutorAdapter{h: h, runner: runner, mcpClient: mcpClient, sink: sink}
+	}
 
 	// BeforeModelCall hook (step 0 = the initial call). Hook receives
 	// &preq so mutations to Model/Tools/Messages/etc. apply to the
@@ -202,6 +218,17 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 			break
 		}
 
+		// NEX-745: claudesdk sets SupportsCustomTools=true (it's the
+		// point of the lane) but its whole tool round-trip already
+		// happened INSIDE the provider.RunTurn call above, serviced via
+		// ProviderRequest.ToolExecutor (the toolExecutorAdapter wired in
+		// above — same executeToolCall path, so hooks/sink events
+		// already fired). Its ProviderResult.ToolCalls therefore comes
+		// back empty; this branch's "turn is done" path is what a
+		// completed claudesdk turn hits — never the tool-execution loop
+		// below, which would otherwise re-run the same calls a second
+		// time via runner.Run.
+		//
 		// No tool calls → turn is done.
 		if len(presult.ToolCalls) == 0 {
 			stopReason = presult.StopReason
@@ -562,6 +589,43 @@ func (h *Harness) executeToolCall(
 		ToolName:   call.Name, // required by Gemini's FunctionResponse contract; ignored by other providers
 	}
 	return
+}
+
+// toolExecutorAdapter implements ToolExecutor (NEX-745 §4) by delegating
+// to the harness's own executeToolCall — the exact BeforeToolCall →
+// runner/MCP dispatch → AfterToolCall pipeline direct-api providers use.
+// Constructed once per turn in runTurn and handed to a subprocess-stream
+// provider (claudesdk) via ProviderRequest.ToolExecutor; the provider
+// calls Execute synchronously whenever its subprocess reports a custom
+// tool call mid-stream, then feeds the result back over its own wire.
+//
+// step is a local monotonic counter (NOT the outer runTurn loop's
+// stepCount): a claudesdk turn's entire tool round-trip happens inside
+// ONE call to provider.RunTurn, so there is no "round N" to key off of
+// here. It only has to be unique-and-increasing within the turn for the
+// BeforeToolCallCtx/AfterToolCallCtx.Step field hooks observe.
+type toolExecutorAdapter struct {
+	h         *Harness
+	runner    ToolRunner
+	mcpClient *mcpclient.Client
+	sink      EventSink
+	step      atomic.Int64
+}
+
+func (a *toolExecutorAdapter) Execute(ctx context.Context, call ToolCall) (ToolResult, error) {
+	step := int(a.step.Add(1))
+	inv := ToolInvocation{ID: call.ID, Name: call.Name, Args: call.Args}
+	_, completed, aborted, err := a.h.executeToolCall(ctx, inv, step-1, a.runner, a.mcpClient, a.sink)
+	if err != nil {
+		return ToolResult{}, err
+	}
+	if aborted {
+		if ctx.Err() != nil {
+			return ToolResult{}, ctx.Err()
+		}
+		return ToolResult{}, context.Canceled
+	}
+	return ToolResult{Result: completed.Result, Err: completed.Err}, nil
 }
 
 func lowerRequest(req TurnRequest) ProviderRequest {
