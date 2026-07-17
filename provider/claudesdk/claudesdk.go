@@ -25,7 +25,11 @@
 // (CLAUDE_CODE_OAUTH_TOKEN via ProviderEnv, or ambient
 // ~/.claude/.credentials.json) — this package never reads it to
 // construct its own HTTP request (spec §1, §6 — the banned CLIProxyAPI
-// pattern).
+// pattern). The sidecar's spawn env is also scrubbed of
+// ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN (see scrubAuthEnv) so an
+// ambient metered API key set for a co-located claude-api lane can't
+// silently outrank CLAUDE_CODE_OAUTH_TOKEN in the vendored SDK's auth
+// precedence.
 package claudesdk
 
 import (
@@ -204,9 +208,11 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 	if req.Cwd != "" {
 		cmd.Dir = req.Cwd
 	}
-	if len(req.ProviderEnv) > 0 {
-		cmd.Env = subprocess.MergeEnv(os.Environ(), req.ProviderEnv)
-	}
+	// Scrub ambient auth-erosion vars UNCONDITIONALLY (NEX-745 review
+	// gate, MED) — regardless of whether ProviderEnv is set — before
+	// overlaying ProviderEnv (which carries the authoritative
+	// CLAUDE_CODE_OAUTH_TOKEN). See scrubAuthEnv's doc for why.
+	cmd.Env = subprocess.MergeEnv(scrubAuthEnv(os.Environ()), req.ProviderEnv)
 	// Process-group spawn (NEX-745 review gate, HIGH): the sidecar spawns
 	// the real `claude` CLI as its OWN child (a grandchild of bridle), and
 	// index.ts registers no SIGTERM handler, so a single-PID signal (the
@@ -312,6 +318,42 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 	}
 
 	return providerResult(state), nil
+}
+
+// scrubbedEnvKeys lists ambient env vars that must never reach the
+// sidecar unfiltered (NEX-745 review gate, MED — auth-policy erosion).
+// The vendored @anthropic-ai/claude-agent-sdk's auth precedence ranks
+// ANTHROPIC_API_KEY (and ANTHROPIC_AUTH_TOKEN) ABOVE
+// CLAUDE_CODE_OAUTH_TOKEN. Since a dual-lane bridle deployment (the
+// direct claude-api lane reads ANTHROPIC_API_KEY from its own env in the
+// SAME process) can easily have ANTHROPIC_API_KEY set in os.Environ(),
+// leaving it in the sidecar's inherited env would make a claudesdk turn
+// silently fall back to METERED api-key billing — defeating the entire
+// premise of this subscription-token lane and failing spec §10.2's
+// "no ANTHROPIC_API_KEY in env" acceptance criterion. Scrubbed
+// unconditionally: the default funnel/subscription posture always wins;
+// there is no v1 opt-in to api-key mode for this provider (an operator
+// who wants that should use provider/claude instead, which already
+// reads ANTHROPIC_API_KEY as its documented auth path).
+var scrubbedEnvKeys = []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
+
+// scrubAuthEnv returns a copy of env with every KEY=VALUE entry whose
+// KEY is in scrubbedEnvKeys removed. env is left unmodified.
+func scrubAuthEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		skip := false
+		for _, k := range scrubbedEnvKeys {
+			if strings.HasPrefix(kv, k+"=") {
+				skip = true
+				break
+			}
+		}
+		if !skip {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 // buildInit lowers a bridle.ProviderRequest into the sidecar's init line.

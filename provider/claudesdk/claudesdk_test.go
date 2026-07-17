@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -146,6 +147,53 @@ echo '{"type":"done","stop_reason":"refusal"}'
 	log, _ := os.ReadFile(argvLog)
 	if got := len(splitNonEmptyLines(string(log))); got != 1 {
 		t.Errorf("sidecar invoked %d times; want 1 (refusal must not be retried even with MaxRetries>0)", got)
+	}
+}
+
+// --- MED (NEX-745 review gate): ambient ANTHROPIC_API_KEY/
+// ANTHROPIC_AUTH_TOKEN must NOT reach the sidecar's env. The vendored
+// Agent SDK's auth precedence ranks ANTHROPIC_API_KEY ABOVE
+// CLAUDE_CODE_OAUTH_TOKEN, so a dual-lane deployment (claude-api lane in
+// the same bridle process reading ANTHROPIC_API_KEY from env) would
+// otherwise silently fall back to METERED api-key billing for every
+// claudesdk turn too, defeating the whole point of the subscription
+// lane (spec §10.2).
+
+func TestClaudeSDK_SidecarEnv_ScrubsAmbientAnthropicAuthVars(t *testing.T) {
+	envFile := filepath.Join(t.TempDir(), "env.out")
+	sidecar := writeFakeSidecar(t, `
+env > "`+envFile+`"
+echo '{"type":"done","stop_reason":"end_turn"}'
+`)
+
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ambient-metered-key-must-not-leak")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "ambient-auth-token-must-not-leak")
+
+	p := &claudesdk.Provider{SidecarPath: sidecar, Mode: claudesdk.ModeFunnel}
+	sink := &fake.SliceEventSink{}
+
+	_, err := p.RunTurn(context.Background(), bridle.ProviderRequest{
+		Model:       "claude-fake",
+		Messages:    []bridle.ProviderMessage{{Role: "user", Content: "hi"}},
+		ProviderEnv: map[string]string{"CLAUDE_CODE_OAUTH_TOKEN": "sub-token-authoritative"},
+	}, sink)
+	if err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+
+	envOut, readErr := os.ReadFile(envFile)
+	if readErr != nil {
+		t.Fatalf("read captured sidecar env: %v", readErr)
+	}
+	env := string(envOut)
+	if strings.Contains(env, "ANTHROPIC_API_KEY=") {
+		t.Error("sidecar env contains ANTHROPIC_API_KEY — the ambient metered key must be scrubbed, not silently override CLAUDE_CODE_OAUTH_TOKEN")
+	}
+	if strings.Contains(env, "ANTHROPIC_AUTH_TOKEN=") {
+		t.Error("sidecar env contains ANTHROPIC_AUTH_TOKEN — must be scrubbed")
+	}
+	if !strings.Contains(env, "CLAUDE_CODE_OAUTH_TOKEN=sub-token-authoritative") {
+		t.Error("sidecar env missing CLAUDE_CODE_OAUTH_TOKEN — the subscription token from ProviderEnv must still reach the sidecar")
 	}
 }
 
