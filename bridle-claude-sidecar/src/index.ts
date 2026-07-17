@@ -30,6 +30,42 @@ function emit(event: SidecarOutbound): void {
   process.stdout.write(JSON.stringify(event) + '\n');
 }
 
+// currentQuery is the live query() handle for whatever turn is in
+// flight, set inside main() below. Module-scope so the SIGTERM/SIGINT
+// handler (registered once, below) can reach it without plumbing a
+// reference through main()'s call chain.
+let currentQuery: { interrupt(): Promise<unknown> } | undefined;
+
+// Defense-in-depth SIGTERM/SIGINT handler (NEX-745 review gate, HIGH):
+// bridle's Go side now kills this sidecar's whole PROCESS GROUP on
+// cancellation (internal/subprocess.SetPgid + WatchCancelGroup), which
+// is the primary fix and reaps the real `claude` CLI child even if this
+// handler never runs. This handler is the second, independent layer: it
+// gives the Agent SDK a chance to interrupt/dispose its own child
+// cleanly (rather than relying solely on the OS-level group SIGKILL
+// after the grace window) whenever this process receives the signal
+// directly — e.g. a caller that sends SIGTERM without going through
+// bridle's group-kill path, or a future wire-level `interrupt` message
+// arriving concurrently with an external signal.
+function installShutdownHandler(): void {
+  let shuttingDown = false;
+  const onSignal = (): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    void (async () => {
+      try {
+        await currentQuery?.interrupt();
+      } catch {
+        // Best-effort: the query may already be done/gone. Exit either way.
+      } finally {
+        process.exit(0);
+      }
+    })();
+  };
+  process.on('SIGTERM', onSignal);
+  process.on('SIGINT', onSignal);
+}
+
 function emitError(cls: EventError['class'], message: string): void {
   emit({ type: 'error', class: cls, message });
 }
@@ -60,6 +96,7 @@ interface PendingNativeCall {
 }
 
 async function main(): Promise<void> {
+  installShutdownHandler();
   const rl = createInterface({ input: process.stdin, terminal: false });
   const lines = rl[Symbol.asyncIterator]();
 
@@ -197,6 +234,7 @@ async function main(): Promise<void> {
   try {
     const q = query({ prompt: init.prompt, options });
     liveQuery = q;
+    currentQuery = q;
 
     for await (const msg of q) {
       const anyMsg = msg as Record<string, unknown>;

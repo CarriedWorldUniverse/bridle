@@ -197,6 +197,99 @@ exec sleep 9999
 	waitForNoOrphan(t, pattern)
 }
 
+// --- HIGH (NEX-745 review gate): SIGTERM must reap the whole process
+// TREE, not just the sidecar's own PID. The real bridle-claude-sidecar
+// spawns the actual `claude` CLI as a GRANDCHILD (the Agent SDK's own
+// subprocess), and index.ts registers no SIGTERM handler of its own, so
+// a single-PID kill leaves that grandchild running — orphaned, still
+// holding the auth token, possibly still streaming/spending. The
+// existing TestClaudeSDK_KillMidTurn_NoOrphan test above uses a 1-HOP
+// fake (the fake sidecar script IS the leaf process) so it can't catch
+// this: this test's fake sidecar spawns its OWN child (a background
+// `tail -f` on a marker file whose path is unique per test run,
+// pgrep-able independent of the sidecar's own pid/argv) to reproduce the
+// real 2-hop topology.
+
+func TestClaudeSDK_KillMidTurn_NoOrphanGrandchild(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("pgrep-based orphan check is unix-only")
+	}
+	sidecarDir := t.TempDir()
+	marker := filepath.Join(sidecarDir, "grandchild-marker")
+	if err := os.WriteFile(marker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	sidecarPath := filepath.Join(sidecarDir, "bridle-claude-sidecar")
+	// The sidecar backgrounds a grandchild (`tail -f marker`, a
+	// long-running process whose argv carries the unique marker path)
+	// and then waits on it — the same shape as node spawning the real
+	// `claude` CLI and awaiting its exit.
+	// The grandchild's stdout/stderr are redirected away from the
+	// sidecar's own stdout pipe: on a real fork, a backgrounded child
+	// inherits its parent's fds, and if it kept the pipe's write end
+	// open, bridle's stdout-EOF read loop would block on the grandchild
+	// too (a real but SEPARATE bug from the one under test here — the
+	// real claude CLI is spawned via node's child_process with its own
+	// stdio, not sharing the sidecar's stdout). Redirecting isolates
+	// this test to the kill/reap behavior alone.
+	script := "#!/bin/sh\nread init_line\n" +
+		`echo '{"type":"text_delta","text":"partial"}'` + "\n" +
+		`tail -f "` + marker + `" >/dev/null 2>&1 &` + "\n" +
+		`wait` + "\n"
+	if err := os.WriteFile(sidecarPath, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake sidecar: %v", err)
+	}
+
+	p := &claudesdk.Provider{SidecarPath: sidecarPath, Mode: claudesdk.ModeFunnel}
+	sink := &fake.SliceEventSink{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+
+	// Bounded by an explicit timeout, not just the default `go test`
+	// timeout: RunTurn's own stdout-EOF read loop is a separate risk
+	// surface from the orphan bug this test targets, and a bounded
+	// failure here is far more actionable than a 10-minute hang.
+	type runResult struct {
+		result bridle.ProviderResult
+		err    error
+	}
+	runDone := make(chan runResult, 1)
+	go func() {
+		res, err := p.RunTurn(ctx, bridle.ProviderRequest{
+			Model:    "claude-fake",
+			Messages: []bridle.ProviderMessage{{Role: "user", Content: "hi"}},
+		}, sink)
+		runDone <- runResult{res, err}
+	}()
+
+	var result bridle.ProviderResult
+	var err error
+	select {
+	case rr := <-runDone:
+		result, err = rr.result, rr.err
+	case <-time.After(15 * time.Second):
+		t.Fatal("RunTurn did not return within 15s of cancellation — the sidecar's stdout pipe likely never hit EOF")
+	}
+	if err != nil {
+		t.Fatalf("RunTurn on cancellation: want nil error (clean interrupt), got %v", err)
+	}
+	if result.StopReason != bridle.StopReasonAborted {
+		t.Errorf("StopReason = %q; want aborted", result.StopReason)
+	}
+
+	// Assert BOTH hops are gone: the sidecar script itself, AND its
+	// grandchild (the tail process pinned to the marker path). A
+	// single-PID kill (the pre-fix behavior) leaves the second alive.
+	sidecarPattern := "[" + filepath.Dir(sidecarPath)[:1] + "]" + filepath.Dir(sidecarPath)[1:]
+	waitForNoOrphan(t, sidecarPattern)
+	markerPattern := "[" + marker[:1] + "]" + marker[1:]
+	waitForNoOrphan(t, markerPattern)
+}
+
 // waitForNoOrphan polls pgrep -f <pattern> for up to a few seconds
 // (covers WatchCancel's grace window if SIGTERM alone didn't land) and
 // fails if a matching process is still alive at the end.

@@ -123,8 +123,12 @@ func (p *Provider) Capabilities() bridle.ProviderCapabilities {
 // event stream to sink, services custom tool calls via
 // req.ToolExecutor, and returns once the sidecar reports "done" (or the
 // process exits/errors). Cancellation via ctx sends SIGTERM then SIGKILL
-// after a grace period (internal/subprocess.WatchCancel, reused
-// unchanged from claudecode).
+// after a grace period — to the WHOLE process group the sidecar leads
+// (internal/subprocess.SetPgid + WatchCancelGroup), not just the
+// sidecar's own PID, because the sidecar spawns the real `claude` CLI as
+// its own child and a single-PID signal would leave it orphaned. This
+// differs from claudecode/codexcli/geminicli, which use plain
+// WatchCancel unchanged (they have no such grandchild to reap).
 func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink bridle.EventSink) (bridle.ProviderResult, error) {
 	maxRetries := p.MaxRetries
 	retryDelay := p.RetryDelay
@@ -203,6 +207,15 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 	if len(req.ProviderEnv) > 0 {
 		cmd.Env = subprocess.MergeEnv(os.Environ(), req.ProviderEnv)
 	}
+	// Process-group spawn (NEX-745 review gate, HIGH): the sidecar spawns
+	// the real `claude` CLI as its OWN child (a grandchild of bridle), and
+	// index.ts registers no SIGTERM handler, so a single-PID signal (the
+	// old behavior — see claudecode/codexcli/geminicli, which still use
+	// it unchanged) would leave that grandchild orphaned on cancellation.
+	// SetPgid + WatchCancelGroup below signal the whole process group
+	// instead. Opt-in per subprocess.SetPgid's doc: no other provider is
+	// affected.
+	subprocess.SetPgid(cmd)
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
@@ -220,7 +233,7 @@ func (p *Provider) runTurnOnce(ctx context.Context, req bridle.ProviderRequest, 
 	}
 
 	procExited := make(chan struct{})
-	go subprocess.WatchCancel(ctx, cmd, procExited, subprocess.TermSignal())
+	go subprocess.WatchCancelGroup(ctx, cmd, procExited, subprocess.TermSignal())
 
 	if _, err := stdinPipe.Write(append(initLine, '\n')); err != nil {
 		// Write failed (sidecar died before reading its init line, or

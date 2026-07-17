@@ -75,9 +75,17 @@ never mid-turn.
   → `Harness.executeToolCall`). `SupportsBeforeToolCall: true` is honest
   for bridle-defined tools; it does not currently give bridle a second
   opinion on the SDK's own native-tool permission decisions.
-- **Cancellation is SIGTERM-only.** The wire protocol defines an
-  in-band `interrupt` message (honoured if a caller sends one — see
-  `main()`'s inbound line router) but `provider/claudesdk`'s Go side
-  doesn't send it; it relies entirely on
-  `internal/subprocess.WatchCancel`'s SIGTERM→grace→SIGKILL, the same
-  path `claudecode` uses.
+- **Cancellation is SIGTERM-only from the Go side.** The wire protocol
+  defines an in-band `interrupt` message (honoured if a caller sends one
+  — see `main()`'s inbound line router) but `provider/claudesdk`'s Go
+  side doesn't send it; it relies on
+  `internal/subprocess.SetPgid`+`WatchCancelGroup`'s
+  SIGTERM→grace→SIGKILL, signaling the WHOLE process group this sidecar
+  leads (not just its own PID) so the real `claude` CLI child it spawns
+  is reaped too — unlike `claudecode`, which has no such grandchild and
+  keeps using plain `WatchCancel` unchanged. The sidecar itself also
+  installs a SIGTERM/SIGINT handler (`installShutdownHandler` in
+  `index.ts`) as a second, independent layer: it best-effort
+  `interrupt()`s the live SDK query before exiting, in case this process
+  ever receives the signal directly rather than solely via bridle's
+  group kill.
