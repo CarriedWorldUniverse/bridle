@@ -188,6 +188,76 @@ func TestRegistry_Bind_RejectsEmptyLaneOrNilHarness(t *testing.T) {
 	}
 }
 
+// TestParseCatalog_RejectsZeroContextWindow proves parseCatalog fails
+// closed (an error, not a silently-accepted zero) when a row's
+// context_window is missing/zero. Downstream consumers (skills 2%
+// budget, context-manager) divide-by-zero or treat the budget as
+// unbounded on a zero ContextWindow — this must be caught at parse
+// time, not left to a separate unit test (TestCatalog_StaticConsistency)
+// that only covers today's embedded catalog contents.
+func TestParseCatalog_RejectsZeroContextWindow(t *testing.T) {
+	data := []byte(`
+[[model]]
+lane = "claude-api"
+id = "bad-model"
+provider = "claude-api"
+[model.capabilities]
+system_prompt_mode = "append"
+`)
+	if _, err := parseCatalog(data); err == nil {
+		t.Fatal("expected an error for a row with context_window omitted (0), got nil")
+	}
+}
+
+// TestParseCatalog_RejectsInvalidSystemPromptMode proves parseCatalog
+// fails closed on an unrecognized system_prompt_mode value.
+func TestParseCatalog_RejectsInvalidSystemPromptMode(t *testing.T) {
+	data := []byte(`
+[[model]]
+lane = "claude-api"
+id = "bad-model"
+provider = "claude-api"
+context_window = 100000
+[model.capabilities]
+system_prompt_mode = "bogus"
+`)
+	if _, err := parseCatalog(data); err == nil {
+		t.Fatal("expected an error for an invalid system_prompt_mode, got nil")
+	}
+}
+
+// TestRegistry_List_DefensiveCopy proves a caller mutating a ModelInfo's
+// nested pointer/slice fields returned from List() does NOT corrupt the
+// shared catalog for other Registry instances — the catalog's
+// ModelInfo values are backed by a package-level sync.Once slice shared
+// across every Registry, so a caller mutating List()[i].Pricing.In (a
+// pointer) previously corrupted the catalog process-wide.
+func TestRegistry_List_DefensiveCopy(t *testing.T) {
+	r1 := NewRegistry()
+	models := r1.List()
+	var target *ModelInfo
+	for i := range models {
+		if models[i].Pricing != nil {
+			target = &models[i]
+			break
+		}
+	}
+	if target == nil {
+		t.Fatal("no cataloged model has Pricing set — can't exercise the mutation")
+	}
+	original := target.Pricing.In
+	target.Pricing.In = -999999 // mutate the pointer's target in place
+
+	r2 := NewRegistry()
+	for _, mi := range r2.List() {
+		if mi.ID == target.ID && mi.Lane == target.Lane {
+			if mi.Pricing.In == -999999 {
+				t.Fatalf("mutating r1.List()'s ModelInfo.Pricing corrupted r2's catalog (want unaffected %v, got -999999)", original)
+			}
+		}
+	}
+}
+
 func TestRegistry_List_Sorted(t *testing.T) {
 	r := NewRegistry()
 	models := r.List()

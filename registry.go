@@ -69,6 +69,21 @@ func parseCatalog(data []byte) ([]ModelInfo, error) {
 		if m.Lane == "" || m.ID == "" {
 			return nil, fmt.Errorf("bridle: registry_models.toml: model row missing lane or id (id=%q lane=%q)", m.ID, m.Lane)
 		}
+		// Fail-closed catalog-consistency guard (was previously only a
+		// unit test, TestCatalog_StaticConsistency, which only covers
+		// what's in registry_models.toml TODAY — not a future row a PR
+		// adds). ContextWindow<=0 divides-by-zero / unbounds downstream
+		// budget consumers (skills 2% budget, context-manager); an
+		// invalid SystemPromptMode is a config typo. Both are build-time
+		// bugs in registry_models.toml, so NewRegistry panics on them
+		// (see loadCatalog/NewRegistry) exactly like a TOML parse error.
+		if m.ContextWindow <= 0 {
+			return nil, fmt.Errorf("bridle: registry_models.toml: %s/%s: context_window must be > 0, got %d", m.Lane, m.ID, m.ContextWindow)
+		}
+		mode := SystemPromptMode(m.Capabilities.SystemPromptMode)
+		if !mode.IsValid() {
+			return nil, fmt.Errorf("bridle: registry_models.toml: %s/%s: system_prompt_mode %q is not valid", m.Lane, m.ID, m.Capabilities.SystemPromptMode)
+		}
 		mi := ModelInfo{
 			ID:              m.ID,
 			Lane:            LaneID(m.Lane),
@@ -281,19 +296,24 @@ func (r *Registry) Resolve(aliasOrID, identity string) (ModelHandle, error) {
 		Lane:     string(info.Lane),
 		Provider: info.Provider,
 		Model:    info.ID,
-		Info:     info,
+		Info:     copyModelInfo(info), // see List's doc comment: don't alias the shared catalog
 	}, nil
 }
 
 // List returns every cataloged ModelInfo, sorted by lane then id for
 // deterministic output (feeds the TUI %-picker / /model per
-// agora-spec-bridle §1).
+// agora-spec-bridle §1). Each returned ModelInfo is a deep copy (see
+// copyModelInfo) — the catalog's ModelInfo values are backed by a
+// package-level sync.Once slice shared across EVERY Registry instance
+// in the process, so without copying, a caller mutating
+// List()[i].Pricing.In (a pointer) or appending to List()[i].Aliases
+// would corrupt the catalog for every other Registry too.
 func (r *Registry) List() []ModelInfo {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make([]ModelInfo, 0, len(r.models))
 	for _, mi := range r.models {
-		out = append(out, mi)
+		out = append(out, copyModelInfo(mi))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Lane != out[j].Lane {
@@ -302,4 +322,27 @@ func (r *Registry) List() []ModelInfo {
 		return out[i].ID < out[j].ID
 	})
 	return out
+}
+
+// copyModelInfo returns a deep copy of mi, so a caller mutating the
+// returned value's nested pointers/slices (Pricing, Prompt, Aliases)
+// cannot reach back into the shared catalog storage. See List's doc
+// comment for why this matters.
+func copyModelInfo(mi ModelInfo) ModelInfo {
+	if mi.Aliases != nil {
+		mi.Aliases = append([]string(nil), mi.Aliases...)
+	}
+	if mi.Pricing != nil {
+		p := *mi.Pricing
+		mi.Pricing = &p
+	}
+	if mi.Prompt != nil {
+		pm := *mi.Prompt
+		if mi.Prompt.Dialect != nil {
+			d := *mi.Prompt.Dialect
+			pm.Dialect = &d
+		}
+		mi.Prompt = &pm
+	}
+	return mi
 }
