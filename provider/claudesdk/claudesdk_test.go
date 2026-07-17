@@ -175,6 +175,51 @@ echo '{"type":"done","stop_reason":"refusal"}'
 	}
 }
 
+// --- Test-quality gap (NEX-745 review gate, Sonnet finding, §7.3): the
+// session resume-id invariant (spec §7 invariant 3) previously had NO
+// test that actually FAILS on a mismatch — live_test.go's
+// TestLive_ClaudeSDK_SessionContinuity only t.Logf's what it finds
+// (necessarily: it can't script the real SDK's session ids) and is
+// skipped without a live token anyway, so it never ran in CI. This is a
+// fake-sidecar unit test that scripts a mismatched session_id on the
+// "done" event and asserts claudesdk.go's mismatch branch (~line 287,
+// runTurnOnce) actually fires — runs in CI, no live token needed.
+
+func TestClaudeSDK_ResumeSessionIDMismatch_WarnsButDoesNotFail(t *testing.T) {
+	sidecar := writeFakeSidecar(t, `
+echo '{"type":"text_delta","text":"continuing"}'
+echo '{"type":"done","stop_reason":"end_turn","session_id":"sess-DIFFERENT"}'
+`)
+	p := &claudesdk.Provider{SidecarPath: sidecar, Mode: claudesdk.ModeFunnel}
+	sink := &fake.SliceEventSink{}
+
+	result, err := p.RunTurn(context.Background(), bridle.ProviderRequest{
+		Model:    "claude-fake",
+		Messages: []bridle.ProviderMessage{{Role: "user", Content: "continue please"}},
+		Session:  bridle.SessionHandle{ID: "sess-REQUESTED", New: false},
+	}, sink)
+	if err != nil {
+		t.Fatalf("RunTurn: %v — a resume-id mismatch must be a non-fatal warning, not a turn failure", err)
+	}
+	if result.FinalText != "continuing" {
+		t.Errorf("FinalText = %q; want the turn's real content preserved despite the mismatch", result.FinalText)
+	}
+
+	var sawMismatch bool
+	for _, ev := range sink.Events {
+		te, ok := ev.(bridle.TurnError)
+		if !ok || te.Stage != bridle.TurnErrorStageStderrOutput {
+			continue
+		}
+		if strings.Contains(te.Err.Error(), "sess-DIFFERENT") && strings.Contains(te.Err.Error(), "sess-REQUESTED") {
+			sawMismatch = true
+		}
+	}
+	if !sawMismatch {
+		t.Error("expected a TurnError{Stage:StderrOutput} mentioning both the echoed and requested session ids — the resume-id mismatch branch did not fire")
+	}
+}
+
 // --- MED (NEX-745 review gate): ambient ANTHROPIC_API_KEY/
 // ANTHROPIC_AUTH_TOKEN must NOT reach the sidecar's env. The vendored
 // Agent SDK's auth precedence ranks ANTHROPIC_API_KEY ABOVE
