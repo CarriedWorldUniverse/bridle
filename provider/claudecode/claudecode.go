@@ -599,7 +599,11 @@ func (p *Provider) buildCLIArgs(req bridle.ProviderRequest, sessionIsNew bool) (
 	args = []string{"-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions"}
 
 	if req.AppendSystemPrompt != "" {
-		switch req.SystemPromptMode {
+		// Normalize() collapses agora's SystemPromptFull vocabulary alias
+		// onto SystemPromptReplace before the switch — claude-code's
+		// behavior for "replace" and "full" is identical (both spill via
+		// replaceSystemPromptArgs), so this is a no-op for existing callers.
+		switch req.SystemPromptMode.Normalize() {
 		case bridle.SystemPromptReplace:
 			spillArgs, file, perr := replaceSystemPromptArgs(req.AppendSystemPrompt)
 			if perr != nil {

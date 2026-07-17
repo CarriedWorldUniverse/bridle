@@ -167,6 +167,13 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 					var piece string
 					if json.Unmarshal([]byte(raw), &piece) == nil {
 						reasoningBuf.WriteString(piece)
+						// NEX-767 T7: stream it live too (agora-spec-bridle
+						// §2 reasoning_delta) — reasoningBuf above is the
+						// separate cross-turn-replay accumulation
+						// (extractResult attaches it to SessionDelta); this
+						// emit is the additional live surface, not a
+						// replacement.
+						sink.Emit(bridle.ReasoningChunk{Text: piece})
 					}
 				}
 			}

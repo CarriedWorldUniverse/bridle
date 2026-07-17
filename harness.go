@@ -42,6 +42,16 @@ const (
 	// not discard it. Common cause: hitting an output-token cap and the
 	// CLI surfacing that as a non-zero exit rather than a clean stop.
 	StopReasonProcessExit StopReason = "process_exit"
+
+	// StopReasonRefusal is a vocabulary value for a model-declined-to-
+	// answer stop (agora-spec-bridle §2 done{stop_reason:refusal};
+	// Anthropic's Messages API surfaces this as its own stop_reason on
+	// Fable 5, HTTP 200). NEX-767 T1/T7 adds the CONST so Stream's
+	// done{refusal} mapping (see stream.go's streamStopReason) exists
+	// and is testable; no provider's wire-to-StopReason mapping
+	// produces it yet — detecting the real wire signal per lane is T3
+	// follow-up work (agora-spec-bridle §3's refusal-handling item).
+	StopReasonRefusal StopReason = "refusal"
 )
 
 // Usage holds token and cost data for a turn.
@@ -74,6 +84,16 @@ type Usage struct {
 	// completed turn never has silently-zero usage — it has real
 	// counts, or a flagged estimate, never nothing.
 	Estimated bool
+
+	// ReasoningTokens is the count of extended-thinking/reasoning
+	// tokens the provider billed for this round, when it reports the
+	// breakdown separately from OutputTokens (agora-spec-bridle §2
+	// usage{input, output, cached, reasoning}). Additive field; 0 for
+	// providers/rounds that don't report it (not necessarily "no
+	// reasoning happened" — it may just be folded into OutputTokens
+	// instead, e.g. Anthropic bills thinking tokens as output tokens
+	// today).
+	ReasoningTokens int
 }
 
 // ToolInvocation records a single tool call the model made.

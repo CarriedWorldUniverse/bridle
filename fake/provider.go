@@ -29,6 +29,10 @@ type Step struct {
 	// use it to assert the retry round's usage replaces (is not summed
 	// with) the discarded round's.
 	Usage bridle.Usage
+	// Panic, if true, makes RunTurn panic with a fixed message instead
+	// of returning — for testing the RunTurn/RunStep/Stream panic
+	// recovery boundaries.
+	Panic bool
 }
 
 // Provider is a scripted fake that replays a sequence of Steps.
@@ -67,6 +71,10 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 	}
 	step := p.steps[p.pos]
 	p.pos++
+
+	if step.Panic {
+		panic("fake.Provider: deliberate test panic")
+	}
 
 	if step.Err != nil {
 		return bridle.ProviderResult{}, step.Err
