@@ -412,13 +412,31 @@ func (h *Harness) enforceToolCallContract(
 	round *RoundTiming,
 ) (ProviderResult, error) {
 	hasTools := len(preq.Tools) > 0
-	report := detectLeak(presult, hasTools)
+	// CRITICAL (NEX-745 review gate): the tool-call-as-text
+	// EXTRACTION/repair path must be gated off whenever the provider owns
+	// its own tool execution (preq.ToolExecutor != nil — wired by run.go
+	// for subprocess-stream+SupportsCustomTools providers like claudesdk,
+	// see the wiring comment above). Those providers' round-trip
+	// completes INSIDE RunTurn, so ProviderResult.ToolCalls is empty BY
+	// DESIGN, not because a call leaked as text — detectLeak/repairLeak's
+	// hasTools-gated "JSON tool-call in prose" branch has no way to tell
+	// the two apart on its own. Without this gate, a model recapping a
+	// tool it already (really) called — or an attacker-injected
+	// {"name":...,"arguments":...} blob in untrusted content — gets
+	// fabricated into a ToolInvocation and EXECUTED for real, with no
+	// sidecar round trip and no gate: a prompt-injection ->
+	// arbitrary-tool-execution path. Passing hasTools=false to
+	// detectLeak/repairLeak here disables ONLY that extraction branch
+	// (protocol-token stripping still runs); it does not change behavior
+	// for any other provider, since ToolExecutor is nil everywhere else.
+	extractGate := hasTools && preq.ToolExecutor == nil
+	report := detectLeak(presult, extractGate)
 	if !report.detected {
 		return presult, nil // clean — zero-cost passthrough
 	}
 	sink.Emit(ToolCallRepaired{Stage: toolCallStageDetected, Detail: report.detail})
 
-	repaired := repairLeak(presult, hasTools)
+	repaired := repairLeak(presult, extractGate)
 	if repaired.clean {
 		sink.Emit(ToolCallRepaired{Stage: toolCallStageRepaired, Detail: repaired.detail})
 		return applyRepair(presult, repaired), nil
@@ -445,12 +463,14 @@ func (h *Harness) enforceToolCallContract(
 
 	// Re-run detect→repair on the retried result. Cap at one retry: whatever
 	// the second round produced is what we surface (clean, or flagged).
-	retryReport := detectLeak(retryResult, hasTools)
+	// retryReq carries the same ToolExecutor as preq, so the extraction
+	// gate above applies identically here.
+	retryReport := detectLeak(retryResult, extractGate)
 	if !retryReport.detected {
 		return retryResult, nil // retry produced a clean turn
 	}
 	sink.Emit(ToolCallRepaired{Stage: toolCallStageDetected, Detail: retryReport.detail})
-	retryRepaired := repairLeak(retryResult, hasTools)
+	retryRepaired := repairLeak(retryResult, extractGate)
 	stage := toolCallStageRepaired
 	if !retryRepaired.clean {
 		stage = toolCallStageFlagged
