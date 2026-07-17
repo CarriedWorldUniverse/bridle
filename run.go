@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/CarriedWorldUniverse/bridle/internal/mcpclient"
@@ -61,6 +62,21 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 
 	// Lower TurnRequest → ProviderRequest.
 	preq := lowerRequest(req)
+
+	// NEX-745 §4: wire a ToolExecutor for subprocess-stream providers
+	// whose agentic loop runs mid-RunTurn (claudesdk) — the sidecar
+	// reports a custom tool call from INSIDE the provider's single
+	// RunTurn invocation and must service it there, not wait for
+	// run.go's per-round tool loop below. The adapter delegates to
+	// h.executeToolCall, the exact path direct-api providers use, so
+	// hooks/sink events fire identically. Every other provider gets a
+	// nil ToolExecutor and is unaffected: direct-api providers own their
+	// tool loop in this file and never read the field; subprocess-
+	// stream providers that don't support custom tools (claudecode)
+	// don't request one either.
+	if caps.Category == CategorySubprocessStream && caps.SupportsCustomTools {
+		preq.ToolExecutor = &toolExecutorAdapter{h: h, runner: runner, mcpClient: mcpClient, sink: sink}
+	}
 
 	// BeforeModelCall hook (step 0 = the initial call). Hook receives
 	// &preq so mutations to Model/Tools/Messages/etc. apply to the
@@ -202,6 +218,17 @@ func (h *Harness) runTurn(ctx context.Context, req TurnRequest, runner ToolRunne
 			break
 		}
 
+		// NEX-745: claudesdk sets SupportsCustomTools=true (it's the
+		// point of the lane) but its whole tool round-trip already
+		// happened INSIDE the provider.RunTurn call above, serviced via
+		// ProviderRequest.ToolExecutor (the toolExecutorAdapter wired in
+		// above — same executeToolCall path, so hooks/sink events
+		// already fired). Its ProviderResult.ToolCalls therefore comes
+		// back empty; this branch's "turn is done" path is what a
+		// completed claudesdk turn hits — never the tool-execution loop
+		// below, which would otherwise re-run the same calls a second
+		// time via runner.Run.
+		//
 		// No tool calls → turn is done.
 		if len(presult.ToolCalls) == 0 {
 			stopReason = presult.StopReason
@@ -385,13 +412,31 @@ func (h *Harness) enforceToolCallContract(
 	round *RoundTiming,
 ) (ProviderResult, error) {
 	hasTools := len(preq.Tools) > 0
-	report := detectLeak(presult, hasTools)
+	// CRITICAL (NEX-745 review gate): the tool-call-as-text
+	// EXTRACTION/repair path must be gated off whenever the provider owns
+	// its own tool execution (preq.ToolExecutor != nil — wired by run.go
+	// for subprocess-stream+SupportsCustomTools providers like claudesdk,
+	// see the wiring comment above). Those providers' round-trip
+	// completes INSIDE RunTurn, so ProviderResult.ToolCalls is empty BY
+	// DESIGN, not because a call leaked as text — detectLeak/repairLeak's
+	// hasTools-gated "JSON tool-call in prose" branch has no way to tell
+	// the two apart on its own. Without this gate, a model recapping a
+	// tool it already (really) called — or an attacker-injected
+	// {"name":...,"arguments":...} blob in untrusted content — gets
+	// fabricated into a ToolInvocation and EXECUTED for real, with no
+	// sidecar round trip and no gate: a prompt-injection ->
+	// arbitrary-tool-execution path. Passing hasTools=false to
+	// detectLeak/repairLeak here disables ONLY that extraction branch
+	// (protocol-token stripping still runs); it does not change behavior
+	// for any other provider, since ToolExecutor is nil everywhere else.
+	extractGate := hasTools && preq.ToolExecutor == nil
+	report := detectLeak(presult, extractGate)
 	if !report.detected {
 		return presult, nil // clean — zero-cost passthrough
 	}
 	sink.Emit(ToolCallRepaired{Stage: toolCallStageDetected, Detail: report.detail})
 
-	repaired := repairLeak(presult, hasTools)
+	repaired := repairLeak(presult, extractGate)
 	if repaired.clean {
 		sink.Emit(ToolCallRepaired{Stage: toolCallStageRepaired, Detail: repaired.detail})
 		return applyRepair(presult, repaired), nil
@@ -425,12 +470,14 @@ func (h *Harness) enforceToolCallContract(
 
 	// Re-run detect→repair on the retried result. Cap at one retry: whatever
 	// the second round produced is what we surface (clean, or flagged).
-	retryReport := detectLeak(retryResult, hasTools)
+	// retryReq carries the same ToolExecutor as preq, so the extraction
+	// gate above applies identically here.
+	retryReport := detectLeak(retryResult, extractGate)
 	if !retryReport.detected {
 		return retryResult, nil // retry produced a clean turn
 	}
 	sink.Emit(ToolCallRepaired{Stage: toolCallStageDetected, Detail: retryReport.detail})
-	retryRepaired := repairLeak(retryResult, hasTools)
+	retryRepaired := repairLeak(retryResult, extractGate)
 	stage := toolCallStageRepaired
 	if !retryRepaired.clean {
 		stage = toolCallStageFlagged
@@ -569,6 +616,43 @@ func (h *Harness) executeToolCall(
 		ToolName:   call.Name, // required by Gemini's FunctionResponse contract; ignored by other providers
 	}
 	return
+}
+
+// toolExecutorAdapter implements ToolExecutor (NEX-745 §4) by delegating
+// to the harness's own executeToolCall — the exact BeforeToolCall →
+// runner/MCP dispatch → AfterToolCall pipeline direct-api providers use.
+// Constructed once per turn in runTurn and handed to a subprocess-stream
+// provider (claudesdk) via ProviderRequest.ToolExecutor; the provider
+// calls Execute synchronously whenever its subprocess reports a custom
+// tool call mid-stream, then feeds the result back over its own wire.
+//
+// step is a local monotonic counter (NOT the outer runTurn loop's
+// stepCount): a claudesdk turn's entire tool round-trip happens inside
+// ONE call to provider.RunTurn, so there is no "round N" to key off of
+// here. It only has to be unique-and-increasing within the turn for the
+// BeforeToolCallCtx/AfterToolCallCtx.Step field hooks observe.
+type toolExecutorAdapter struct {
+	h         *Harness
+	runner    ToolRunner
+	mcpClient *mcpclient.Client
+	sink      EventSink
+	step      atomic.Int64
+}
+
+func (a *toolExecutorAdapter) Execute(ctx context.Context, call ToolCall) (ToolResult, error) {
+	step := int(a.step.Add(1))
+	inv := ToolInvocation{ID: call.ID, Name: call.Name, Args: call.Args}
+	_, completed, aborted, err := a.h.executeToolCall(ctx, inv, step-1, a.runner, a.mcpClient, a.sink)
+	if err != nil {
+		return ToolResult{}, err
+	}
+	if aborted {
+		if ctx.Err() != nil {
+			return ToolResult{}, ctx.Err()
+		}
+		return ToolResult{}, context.Canceled
+	}
+	return ToolResult{Result: completed.Result, Err: completed.Err}, nil
 }
 
 func lowerRequest(req TurnRequest) ProviderRequest {

@@ -1,0 +1,28 @@
+{
+  "name": "bridle-claude-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Thin stdio JSON-lines sidecar wrapping @anthropic-ai/claude-agent-sdk for bridle's provider/claudesdk (NEX-745). Never published; image-bundled next to the built claude CLI.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "bridle-claude-sidecar": "dist/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.212",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.12.0",
+    "typescript": "^5.5.4"
+  }
+}

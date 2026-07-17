@@ -317,3 +317,37 @@ func WatchCancel(ctx context.Context, cmd *exec.Cmd, procExited <-chan struct{},
 		// Natural exit — nothing to do.
 	}
 }
+
+// WatchCancelGroup is WatchCancel's opt-in PROCESS-GROUP variant: on ctx
+// cancellation it signals the whole process group led by cmd (via
+// signalGroup/killGroup -- see procgroup_unix.go/procgroup_windows.go),
+// instead of only cmd.Process, so a grandchild the direct child spawned
+// (e.g. claudesdk's sidecar spawning the real `claude` CLI) is reaped
+// too, not left orphaned.
+//
+// Callers MUST have called SetPgid(cmd) before cmd.Start() for this to
+// have group semantics on unix; without it, signalGroup/killGroup
+// degrade to signaling only cmd.Process (same as WatchCancel).
+//
+// This is a SEPARATE function, not a change to WatchCancel's behavior --
+// claudecode/codexcli/geminicli keep calling WatchCancel unchanged and
+// are completely unaffected by this addition (NEX-745 review gate: the
+// process-group kill is opt-in per spawn call, not a global change to
+// the shared cancel-watcher contract).
+func WatchCancelGroup(ctx context.Context, cmd *exec.Cmd, procExited <-chan struct{}, termSignal os.Signal) {
+	select {
+	case <-ctx.Done():
+		_ = signalGroup(cmd, termSignal)
+		timer := time.NewTimer(graceWindow)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			_ = killGroup(cmd)
+		case <-procExited:
+			// Process (group) exited cleanly during grace period -- no
+			// SIGKILL needed.
+		}
+	case <-procExited:
+		// Natural exit -- nothing to do.
+	}
+}

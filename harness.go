@@ -16,6 +16,7 @@ type ProviderID string
 const (
 	ProviderClaude         ProviderID = "claude-api"
 	ProviderClaudeCode     ProviderID = "claude-code"
+	ProviderClaudeSDK      ProviderID = "claude-sdk"
 	ProviderClaudePty      ProviderID = "claude-pty"
 	ProviderOllama         ProviderID = "ollama-local"
 	ProviderOpenAI         ProviderID = "openai-api"
@@ -139,11 +140,11 @@ type InboxItem struct {
 // TurnRequest is the complete input for one deliberation turn.
 type TurnRequest struct {
 	// Identity & framing
-	AspectID           string         // who's running (cost/triage/identity attribution)
-	AppendSystemPrompt string         // composed by funnel: NEXUS.md + SOUL.md + PRIMER + harness rules
+	AspectID           string           // who's running (cost/triage/identity attribution)
+	AppendSystemPrompt string           // composed by funnel: NEXUS.md + SOUL.md + PRIMER + harness rules
 	SystemPromptMode   SystemPromptMode // how AppendSystemPrompt is applied: append (default, zero value) extends claude-code's base prompt; replace swaps it entirely
-	Session            SessionHandle  // opaque handle for provider-side state (subprocess-stream: resume key)
-	SessionTail        []SessionEvent // recent events for direct-api providers to lower into the request
+	Session            SessionHandle    // opaque handle for provider-side state (subprocess-stream: resume key)
+	SessionTail        []SessionEvent   // recent events for direct-api providers to lower into the request
 
 	// This turn
 	UserMessage string      // the prompt that opens this turn (may be empty for autonomous)
