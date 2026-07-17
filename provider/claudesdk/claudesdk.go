@@ -188,7 +188,6 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 // one runTurnOnce call.
 type turnState struct {
 	finalText      string
-	toolCalls      []bridle.ToolInvocation // custom calls, for the SESSION LOG only (spec: observability); ProviderResult.ToolCalls stays empty, see package doc
 	thinkingBlocks []bridle.ThinkingBlock
 	sessionDelta   []bridle.SessionEvent
 	usage          bridle.Usage
@@ -546,9 +545,6 @@ func (p *Provider) serviceToolCall(ctx context.Context, ev sidecarEvent, req bri
 	}
 
 	state.stepCount++
-	state.toolCalls = append(state.toolCalls, bridle.ToolInvocation{
-		ID: ev.ID, Name: ev.Name, Args: ev.Args, Result: reply.Content, Err: result.Err,
-	})
 	state.sessionDelta = append(state.sessionDelta, bridle.SessionEvent{
 		Provider:   providerID,
 		Role:       bridle.RoleTool,

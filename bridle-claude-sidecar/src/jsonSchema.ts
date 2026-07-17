@@ -41,6 +41,12 @@ function propertyToZod(schema: JSONSchema): z.ZodTypeAny {
       return z.array(z.any());
     case 'object':
       if (schema.properties && typeof schema.properties === 'object') {
+        // .partial() makes EVERY nested property optional regardless of
+        // that nested schema's own `required` array — required-ness is
+        // only preserved at the TOP level (jsonSchemaToZodShape below).
+        // Matches this file's documented best-effort posture ("nested
+        // object schemas beyond one level" already degrade), called out
+        // here explicitly so the loosening isn't mistaken for a bug.
         return z.object(jsonSchemaToZodShape(schema)).partial();
       }
       return z.record(z.string(), z.any());
