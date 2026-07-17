@@ -869,6 +869,15 @@ func mergeToolSurface(explicit []ToolDef, mcpTools []mcpclient.ToolDef) ([]ToolD
 	// token 0. Sorting by name makes the serialized block byte-stable
 	// across turns regardless of MCP listing order, so the shared
 	// prefix (system + tools) can actually be cached.
-	sort.Slice(merged, func(i, j int) bool { return merged[i].Name < merged[j].Name })
+	sortToolDefsByName(merged)
 	return merged, nil
+}
+
+// sortToolDefsByName sorts tools in place by Name — the single
+// definition of "byte-stable tool-surface ordering" both the
+// RunTurn/MCP merge path (mergeToolSurface, above) and the Stream
+// direct-api path (lowerStreamToProviderRequest, stream.go) apply, so
+// the two paths can't silently diverge on ordering.
+func sortToolDefsByName(tools []ToolDef) {
+	sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
 }

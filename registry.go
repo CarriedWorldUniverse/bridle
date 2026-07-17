@@ -140,15 +140,30 @@ type ModelHandle struct {
 	Info     ModelInfo
 }
 
+// identityAliasKey is the map key for an identity-scoped alias
+// registration: a STRUCT of (alias, identity), not a delimited string.
+// Resolve/RegisterIdentityAlias previously built this key by
+// concatenating alias+"@"+identity, which is NOT collision-proof:
+// ("a@b", "c") and ("a", "b@c") both concatenate to "a@b@c" — a real
+// risk since identities are sometimes email-shaped (contain "@"). A
+// struct key compares both fields independently, so no delimiter
+// ambiguity is possible regardless of what characters alias/identity
+// contain.
+type identityAliasKey struct {
+	alias    string
+	identity string
+}
+
 // Registry is bridle's facade over the static model catalog plus the
 // caller-wired per-lane Harnesses. The catalog (registry_models.toml)
 // NEVER constructs a Provider — Bind is the seam where deploy-specific
 // credentials/base-URLs enter, wired by the caller once per lane.
 type Registry struct {
-	mu      sync.RWMutex
-	models  map[string]ModelInfo // keyed "lane/id" (catalogKey)
-	aliases map[string]string    // alias, or "alias@identity" -> "lane/id"
-	lanes   map[string]*Harness  // lane -> bound harness (from Bind)
+	mu              sync.RWMutex
+	models          map[string]ModelInfo        // keyed "lane/id" (catalogKey)
+	aliases         map[string]string           // bare alias -> "lane/id"
+	identityAliases map[identityAliasKey]string // (alias, identity) -> "lane/id"
+	lanes           map[string]*Harness         // lane -> bound harness (from Bind)
 }
 
 // NewRegistry parses the embedded static catalog and returns an empty
@@ -164,9 +179,10 @@ func NewRegistry() *Registry {
 		m[catalogKey(string(mi.Lane), mi.ID)] = mi
 	}
 	return &Registry{
-		models:  m,
-		aliases: make(map[string]string),
-		lanes:   make(map[string]*Harness),
+		models:          m,
+		aliases:         make(map[string]string),
+		identityAliases: make(map[identityAliasKey]string),
+		lanes:           make(map[string]*Harness),
 	}
 }
 
@@ -187,11 +203,16 @@ func (r *Registry) Bind(lane string, h *Harness) error {
 	return nil
 }
 
-// RegisterAlias maps alias (optionally "alias@identity" for an
-// identity-scoped alias — the {identity}-interpolated form agora config
-// produces) onto an already-cataloged "lane/id" target. Errors if the
-// target isn't cataloged — aliasing to nothing is a config bug caught
-// at registration time, not resolution time.
+// RegisterAlias maps a bare alias onto an already-cataloged "lane/id"
+// target. Errors if the target isn't cataloged — aliasing to nothing is
+// a config bug caught at registration time, not resolution time.
+//
+// For an identity-scoped override (agora's {identity}-interpolated
+// alias form), use RegisterIdentityAlias instead — it takes alias and
+// identity as SEPARATE parameters, keyed internally by a struct rather
+// than a delimited "alias@identity" string, so it can't collide with a
+// bare alias or another identity's override even when alias/identity
+// values contain "@" (email-shaped identities).
 func (r *Registry) RegisterAlias(alias, target string) error {
 	if alias == "" {
 		return fmt.Errorf("bridle: RegisterAlias: alias must not be empty")
@@ -205,19 +226,42 @@ func (r *Registry) RegisterAlias(alias, target string) error {
 	return nil
 }
 
-// Resolve implements the two-phase alias cascade: alias@identity ->
-// alias -> bare "lane/id" -> error. Unresolvable input errors HERE, at
-// call time — never mid-turn (agora-spec-bridle §1). A cataloged model
-// whose lane hasn't been Bound also errors here, for the same reason:
-// resolving to a handle nothing can Stream against is exactly the kind
-// of failure that must surface at session/run start.
+// RegisterIdentityAlias maps an identity-scoped alias override — the
+// same alias name resolving differently per-identity (agora's
+// {identity}-interpolated alias form) — onto an already-cataloged
+// "lane/id" target. Keyed by the (alias, identity) STRUCT, not a
+// delimited string, so it is collision-proof regardless of what
+// characters alias or identity contain (see identityAliasKey). Errors
+// if the target isn't cataloged, same as RegisterAlias.
+func (r *Registry) RegisterIdentityAlias(alias, identity, target string) error {
+	if alias == "" {
+		return fmt.Errorf("bridle: RegisterIdentityAlias: alias must not be empty")
+	}
+	if identity == "" {
+		return fmt.Errorf("bridle: RegisterIdentityAlias: identity must not be empty (use RegisterAlias for a bare alias)")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.models[target]; !ok {
+		return fmt.Errorf("bridle: RegisterIdentityAlias(%q, %q): target %q not cataloged", alias, identity, target)
+	}
+	r.identityAliases[identityAliasKey{alias: alias, identity: identity}] = target
+	return nil
+}
+
+// Resolve implements the two-phase alias cascade: the identity-scoped
+// override -> the bare alias -> bare "lane/id" -> error. Unresolvable
+// input errors HERE, at call time — never mid-turn (agora-spec-bridle
+// §1). A cataloged model whose lane hasn't been Bound also errors here,
+// for the same reason: resolving to a handle nothing can Stream against
+// is exactly the kind of failure that must surface at session/run start.
 func (r *Registry) Resolve(aliasOrID, identity string) (ModelHandle, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	target := aliasOrID
 	if identity != "" {
-		if t, ok := r.aliases[aliasOrID+"@"+identity]; ok {
+		if t, ok := r.identityAliases[identityAliasKey{alias: aliasOrID, identity: identity}]; ok {
 			target = t
 		} else if t, ok := r.aliases[aliasOrID]; ok {
 			target = t

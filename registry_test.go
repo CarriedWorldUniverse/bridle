@@ -78,8 +78,8 @@ func TestRegistry_ResolveAliasCascade(t *testing.T) {
 	if err := r.RegisterAlias("main", "claude-api/claude-sonnet-5"); err != nil {
 		t.Fatalf("RegisterAlias(main): %v", err)
 	}
-	if err := r.RegisterAlias("main@shadow", "claude-api/claude-opus-4-8"); err != nil {
-		t.Fatalf("RegisterAlias(main@shadow): %v", err)
+	if err := r.RegisterIdentityAlias("main", "shadow", "claude-api/claude-opus-4-8"); err != nil {
+		t.Fatalf("RegisterIdentityAlias(main, shadow): %v", err)
 	}
 
 	// Phase 1: alias@identity wins over the bare alias when both exist.
@@ -128,6 +128,53 @@ func TestRegistry_RegisterAlias_RejectsUncatalogedTarget(t *testing.T) {
 	r := NewRegistry()
 	if err := r.RegisterAlias("bad", "claude-api/does-not-exist"); err == nil {
 		t.Fatal("expected error registering an alias to an uncataloged target, got nil")
+	}
+}
+
+func TestRegistry_RegisterIdentityAlias_RejectsUncatalogedTarget(t *testing.T) {
+	r := NewRegistry()
+	if err := r.RegisterIdentityAlias("bad", "someone", "claude-api/does-not-exist"); err == nil {
+		t.Fatal("expected error registering an identity alias to an uncataloged target, got nil")
+	}
+}
+
+// TestRegistry_IdentityAlias_NoCrossCollision proves the identity-scoped
+// alias key is collision-proof: Resolve("a@b", "c") and Resolve("a",
+// "b@c") must NOT be confused with each other, even though naively
+// concatenating alias+"@"+identity produces the same string ("a@b@c")
+// for both. Real risk: identities are sometimes email-shaped (contain
+// "@"), so a naive string-concat key lets one identity's override
+// resolve for a different (alias, identity) pair.
+func TestRegistry_IdentityAlias_NoCrossCollision(t *testing.T) {
+	r := NewRegistry()
+	if err := r.Bind("claude-api", NewHarness(nil)); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	// Register "a@b" (as a literal alias, containing "@") scoped to
+	// identity "c" -> opus.
+	if err := r.RegisterIdentityAlias("a@b", "c", "claude-api/claude-opus-4-8"); err != nil {
+		t.Fatalf("RegisterIdentityAlias(a@b, c): %v", err)
+	}
+	// Register "a" scoped to identity "b@c" (an email-shaped identity)
+	// -> a DIFFERENT target (sonnet).
+	if err := r.RegisterIdentityAlias("a", "b@c", "claude-api/claude-sonnet-5"); err != nil {
+		t.Fatalf("RegisterIdentityAlias(a, b@c): %v", err)
+	}
+
+	h1, err := r.Resolve("a@b", "c")
+	if err != nil {
+		t.Fatalf("Resolve(a@b, c): %v", err)
+	}
+	if h1.Model != "claude-opus-4-8" {
+		t.Errorf("Resolve(a@b, c) = %q, want claude-opus-4-8 (must not cross-resolve to the a/b@c registration)", h1.Model)
+	}
+
+	h2, err := r.Resolve("a", "b@c")
+	if err != nil {
+		t.Fatalf("Resolve(a, b@c): %v", err)
+	}
+	if h2.Model != "claude-sonnet-5" {
+		t.Errorf("Resolve(a, b@c) = %q, want claude-sonnet-5 (must not cross-resolve to the a@b/c registration)", h2.Model)
 	}
 }
 

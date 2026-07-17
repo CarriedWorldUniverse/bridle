@@ -7,6 +7,7 @@ import (
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
 	"github.com/CarriedWorldUniverse/bridle/fake"
+	"github.com/CarriedWorldUniverse/bridle/internal/normalize"
 )
 
 // drainStream collects every StreamEvent off ch until it closes.
@@ -233,5 +234,34 @@ func TestStream_RecoversFromProviderPanic(t *testing.T) {
 	// !ok, not block).
 	if _, stillOpen := <-ch; stillOpen {
 		t.Error("channel still open after the terminal ErrorEvent")
+	}
+}
+
+// TestClassifyStreamError_MatchesProviderErrorClass is the sync-guard
+// finding #7: stream.go's ClassifyStreamError duplicates (but cannot
+// call, per import-cycle — see its doc comment) internal/normalize.
+// ProviderErrorClass's switch. Nothing else keeps the two in sync, so
+// this test iterates every ProviderErrorKind and asserts the two
+// mappings agree — the guard against silent drift when T3 adds new
+// kinds/classes.
+func TestClassifyStreamError_MatchesProviderErrorClass(t *testing.T) {
+	kinds := []bridle.ProviderErrorKind{
+		bridle.ProviderErrorAuthFailed,
+		bridle.ProviderErrorRateLimit,
+		bridle.ProviderErrorServerError,
+		bridle.ProviderErrorNetworkError,
+		bridle.ProviderErrorTimeout,
+		bridle.ProviderErrorTLSError,
+		bridle.ProviderErrorConfig,
+		bridle.ProviderErrorCrash,
+		bridle.ProviderErrorSubprocessExit,
+	}
+	for _, kind := range kinds {
+		pe := &bridle.ProviderError{Kind: kind}
+		got := bridle.ClassifyStreamError(pe)
+		want := normalize.ProviderErrorClass(kind)
+		if got != want {
+			t.Errorf("ClassifyStreamError(kind=%q) = %q, want %q (normalize.ProviderErrorClass) — the two switches have drifted", kind, got, want)
+		}
 	}
 }

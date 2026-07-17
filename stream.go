@@ -267,10 +267,17 @@ func (noopToolRunner) Run(ctx context.Context, call ToolCall) (json.RawMessage, 
 // follow-up (openai.go only).
 func lowerStreamToProviderRequest(handle ModelHandle, req Request) ProviderRequest {
 	appendSystemPrompt, messages := lowerRoleMessages(req.Messages)
+	// Sort by name, matching mergeToolSurface's ordering exactly
+	// (run.go): the merged/lowered tool surface is serialized into the
+	// prompt prefix on every provider call, so any reordering here
+	// invalidates the vLLM prefix cache from token 0. Copy first — this
+	// must not mutate the caller's req.Tools slice.
+	tools := append([]ToolDef(nil), req.Tools...)
+	sortToolDefsByName(tools)
 	return ProviderRequest{
 		AppendSystemPrompt: appendSystemPrompt,
 		Messages:           messages,
-		Tools:              req.Tools,
+		Tools:              tools,
 		Model:              handle.Model,
 		MaxOutputTokens:    req.MaxTokens,
 		ProviderEnv:        req.ProviderEnv,
@@ -364,7 +371,7 @@ func (s *streamSink) Emit(ev Event) {
 // for a failed round.
 func emitTerminal(sink *streamSink, pr ProviderResult, err error) {
 	if err != nil {
-		sink.ch <- ErrorEvent{Class: classifyStreamError(err), Err: err}
+		sink.ch <- ErrorEvent{Class: ClassifyStreamError(err), Err: err}
 		return
 	}
 	for _, tc := range pr.ToolCalls {
@@ -408,14 +415,21 @@ func streamStopReason(sr StopReason, hasToolCalls bool) StreamStopReason {
 	}
 }
 
-// classifyStreamError derives an ErrorClass from a RunStep/RunTurn
+// ClassifyStreamError derives an ErrorClass from a RunStep/RunTurn
 // error for Stream's error{class} event. Mirrors (but cannot call —
 // see internal/normalize.ProviderErrorClass's doc comment for the
 // import-cycle reason) normalize.ProviderErrorClass's *ProviderError
 // switch. Non-ProviderError errors (context cancellation, a panic
 // converted to error, etc.) fall through to ErrorClassProvider — the
 // residual bucket.
-func classifyStreamError(err error) ErrorClass {
+//
+// Exported (rather than left package-private, like the rest of Stream's
+// helpers) solely so a cross-package test can assert this switch stays
+// in sync with normalize.ProviderErrorClass without recreating the
+// import cycle that prevents this function from calling that one
+// directly (see stream_test.go's TestClassifyStreamError_
+// MatchesProviderErrorClass).
+func ClassifyStreamError(err error) ErrorClass {
 	var pe *ProviderError
 	if errors.As(err, &pe) {
 		switch pe.Kind {
