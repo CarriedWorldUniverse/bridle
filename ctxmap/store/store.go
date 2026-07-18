@@ -23,7 +23,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 type Kind string
@@ -141,7 +141,15 @@ CREATE INDEX IF NOT EXISTS idx_prov_fact ON provenance(fact_id);
 `
 
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_busy_timeout=5000")
+	// modernc.org/sqlite (pure-Go, no cgo) uses driver name "sqlite" and
+	// _pragma= DSN params (not mattn's _journal_mode=/_busy_timeout=). A bare
+	// ":memory:" DSN rejects a trailing query string, so route it through the
+	// file::memory: form instead.
+	dsn := path
+	if dsn == ":memory:" {
+		dsn = "file::memory:"
+	}
+	db, err := sql.Open("sqlite", dsn+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, err
 	}
