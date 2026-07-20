@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	bridle "github.com/CarriedWorldUniverse/bridle"
@@ -42,6 +43,12 @@ func dbg(format string, a ...interface{}) {
 		fmt.Fprintf(os.Stderr, "[ctxmap-dbg] "+format+"\n", a...)
 	}
 }
+
+// memMsgHeader is the first line of the injected working-memory message in
+// within/refresh mode. Strip logic matches ONLY messages with Role "user" whose
+// Content starts with this prefix — a real user message cannot collide (it
+// would have to begin with the exact header, which only we emit).
+const memMsgHeader = "## Working memory (live view — auto-refreshed)"
 
 type attachment struct {
 	eng   *memory.Engine
@@ -133,12 +140,23 @@ func (a *attachment) beforeModelCall(ctx context.Context, in bridle.BeforeModelC
 	return in, bridle.HookContinue, nil
 }
 
-// beforeModelCallWithin keeps the working-memory block in the SYSTEM PROMPT and
-// REFRESHES it every step. The system prompt is never scrolled, so facts placed
-// there don't degrade as the tool loop grows — the whole point of within-turn
-// mode. baseSys (the host's own system prompt) is captured once and the memory
-// section is rebuilt each step from the latest store state (which tool-result
-// ingestion has been populating), so the block never accumulates or goes stale.
+// beforeModelCallWithin keeps the working-memory block in the conversation and
+// REFRESHES it every step — but at the END of the message list, not in the
+// system prompt. The block carries working state (recent steps / last command /
+// output tail) that changes on EVERY tool call, so injecting it at position 0
+// (the old design) rewrote the FIRST tokens of every request: a longest-common-
+// prefix cache then reads ZERO hits for that request (~20% session hit measured
+// on kimi). Keeping the system prompt STATIC (baseSys + Framing, set once at
+// step 0) and moving the churning block to the tail means a block change
+// re-prefills only the few hundred tail tokens after it — the entire system
+// prompt + conversation prefix stays cache-hot.
+//
+// baseSys (the host's own system prompt) is captured once at step 0 and never
+// rewritten after, so the prefix is byte-stable across steps. The block itself
+// is rebuilt each step from the latest store state (which tool-result ingestion
+// has been populating), so it never accumulates or goes stale; staying LAST in
+// the message list keeps it un-scrolled as the tool loop grows — the whole
+// point of within-turn mode.
 func (a *attachment) beforeModelCallWithin(in bridle.BeforeModelCallCtx) (bridle.BeforeModelCallCtx, bridle.HookAction, error) {
 	if dbgOn {
 		if !a.lastStepAt.IsZero() {
@@ -166,25 +184,40 @@ func (a *attachment) beforeModelCallWithin(in bridle.BeforeModelCallCtx) (bridle
 				Name: t.Name, Description: t.Description, InputSchema: t.InputSchema,
 			})
 		}
-	}
-	block := a.eng.WorkingMemoryBlock(a.focus)
-	// Refresh the system prompt ONLY when the block content changed. Rewriting it
-	// every step would bust the prefix cache on every call (my own spec's cache-
-	// stability invariant); facts land rarely, so most steps keep a stable prefix
-	// and only a genuine new fact triggers one re-prefill.
-	if in.Step == 0 || block != a.lastBlock {
+		// static prefix: framing ONLY, no block — set once, never rewritten.
+		// Any byte that changes here would invalidate the whole cached prefix.
 		base := a.baseSys
 		if base != "" {
 			base += "\n\n"
 		}
-		in.Request.AppendSystemPrompt = base + memory.Framing + "\n\n" + block
-		a.lastBlock = block
-		// dump the CONTENT, not just the size — the experiment's quality question
-		// is "are the injected facts the load-bearing ones?", answerable only by
-		// reading what the model was actually given.
-		dbg("within step=%d block=%dch (system-prompt REFRESHED); content:\n----8<----\n%s\n---->8----", in.Step, len(block), block)
+		in.Request.AppendSystemPrompt = base + memory.Framing
+	}
+	block := a.eng.WorkingMemoryBlock(a.focus)
+	// run.go builds the ProviderRequest ONCE and mutates it across steps, so the
+	// previous step's injected memory message is still sitting in this slice —
+	// drop it before re-appending, or the block would accumulate one copy per
+	// step. Fresh slice (no aliasing into the caller's backing array).
+	filtered := make([]bridle.ProviderMessage, 0, len(in.Request.Messages))
+	for _, m := range in.Request.Messages {
+		if m.Role == "user" && strings.HasPrefix(m.Content, memMsgHeader) {
+			continue
+		}
+		filtered = append(filtered, m)
+	}
+	in.Request.Messages = filtered
+	changed := block != a.lastBlock
+	a.lastBlock = block
+	if strings.TrimSpace(block) != "" {
+		in.Request.Messages = append(in.Request.Messages,
+			bridle.ProviderMessage{Role: "user", Content: memMsgHeader + "\n" + block})
+	}
+	// dump the CONTENT, not just the size — the experiment's quality question
+	// is "are the injected facts the load-bearing ones?", answerable only by
+	// reading what the model was actually given.
+	if changed {
+		dbg("within step=%d block=%dch (REFRESHED at prompt END — prefix cache stays hot); content:\n----8<----\n%s\n---->8----", in.Step, len(block), block)
 	} else {
-		dbg("within step=%d block=%dch (unchanged, prefix stable)", in.Step, len(block))
+		dbg("within step=%d block=%dch (unchanged at prompt END, prefix stable)", in.Step, len(block))
 	}
 	return in, bridle.HookContinue, nil
 }
