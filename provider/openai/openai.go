@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/openai/openai-go"
@@ -149,10 +150,24 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 	// Accumulate locally so extractResult can attach the full
 	// reasoning text to the SessionDelta for cross-turn replay.
 	var reasoningBuf strings.Builder
+	// The accumulator folds ONLY the three top-level token totals into the
+	// final ChatCompletion (streamaccumulator.go accumulateDelta) — it drops
+	// prompt_tokens_details / completion_tokens_details AND every extra field
+	// (the OpenRouter `cost`). So capture the usage-bearing chunk (the final
+	// one, per stream_options.include_usage) verbatim here, same pattern as
+	// the reasoning_content capture below; usageFromChunk lowers it after the
+	// stream ends. Without this, cached/reasoning tokens and cost read zero
+	// on the streaming path — which is every RunTurn.
+	var streamUsage openai.CompletionUsage
+	var haveStreamUsage bool
 	for stream.Next() {
 		chunk := stream.Current()
 		if !acc.AddChunk(chunk) {
 			return bridle.ProviderResult{}, fmt.Errorf("openai: accumulator rejected chunk")
+		}
+		if raw := chunk.Usage.RawJSON(); raw != "" && raw != "null" {
+			streamUsage = chunk.Usage
+			haveStreamUsage = true
 		}
 		// Emit content deltas live; tool-call argument deltas are
 		// captured by the accumulator but not surfaced as ModelChunks.
@@ -191,7 +206,38 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		return bridle.ProviderResult{}, fmt.Errorf("openai: API error: %w", err)
 	}
 
-	return extractResult(&acc.ChatCompletion, reasoningBuf.String())
+	res, err := extractResult(&acc.ChatCompletion, reasoningBuf.String())
+	if err == nil && haveStreamUsage {
+		// The captured chunk carries the FULL usage block straight off the
+		// wire — totals, details, and extra fields — so it supersedes the
+		// accumulator-derived (details-less) usage extractResult built.
+		res.Usage = usageFromChunk(streamUsage)
+	}
+	return res, err
+}
+
+// usageFromChunk lowers a wire-verbatim CompletionUsage (captured from the
+// usage-bearing stream chunk — see RunTurn) into bridle.Usage: token totals,
+// the cached/reasoning detail counts, and the OpenRouter/LiteLLM `cost`
+// extra field (exact upstream USD; absent on standard OpenAI backends → 0).
+func usageFromChunk(u openai.CompletionUsage) bridle.Usage {
+	usage := bridle.Usage{
+		InputTokens:          int(u.PromptTokens),
+		OutputTokens:         int(u.CompletionTokens),
+		CacheReadInputTokens: int(u.PromptTokensDetails.CachedTokens),
+		ReasoningTokens:      int(u.CompletionTokensDetails.ReasoningTokens),
+	}
+	// NB: apijson marks EXTRA fields invalid-status (they're unknown to the
+	// typed schema), so Valid() is false even when a value is present — gate
+	// on Raw() instead.
+	if f, ok := u.JSON.ExtraFields["cost"]; ok {
+		if raw := f.Raw(); raw != "" && raw != "null" {
+			if v, err := strconv.ParseFloat(raw, 64); err == nil {
+				usage.CostUSD = v
+			}
+		}
+	}
+	return usage
 }
 
 // extractResult pulls finalText/toolCalls/usage out of an accumulated
@@ -266,25 +312,38 @@ func extractResult(completion *openai.ChatCompletion, streamReasoning string) (b
 
 	stopReason := normalize.OpenAIStopReason(string(choice.FinishReason))
 
+	usage := bridle.Usage{
+		InputTokens:  int(completion.Usage.PromptTokens),
+		OutputTokens: int(completion.Usage.CompletionTokens),
+		// prompt_tokens_details.cached_tokens is the prefix-cache hit count
+		// on OpenAI-shape backends (OpenAI, Moonshot/kimi, DeepSeek, most
+		// gateways). Lowering it makes cache behavior OBSERVABLE at the
+		// host (agora's usage row) — without it the ~20%-hit placement
+		// regression on kimi was invisible from inside the harness.
+		// Backends that omit the field yield zero, which is also the
+		// correct "no cache" report.
+		CacheReadInputTokens: int(completion.Usage.PromptTokensDetails.CachedTokens),
+		// completion_tokens_details.reasoning_tokens: reasoner models
+		// (kimi-k3, DeepSeek) bill thinking as output; surface it so the
+		// host can tell reasoning spend from answer spend.
+		ReasoningTokens: int(completion.Usage.CompletionTokensDetails.ReasoningTokens),
+	}
+	// OpenRouter (and LiteLLM passing it through) reports the EXACT upstream
+	// charge as a non-standard `cost` field (USD float) on the usage block.
+	// It's not in openai-go's typed CompletionUsage, so read it from the
+	// preserved raw JSON. When present it beats any host-side price-table
+	// estimate; standard OpenAI backends omit it and CostUSD stays 0.
+	if f, ok := completion.Usage.JSON.ExtraFields["cost"]; ok {
+		if raw := f.Raw(); raw != "" && raw != "null" {
+			if v, err := strconv.ParseFloat(raw, 64); err == nil {
+				usage.CostUSD = v
+			}
+		}
+	}
 	return bridle.ProviderResult{
-		FinalText: finalText,
-		ToolCalls: toolCalls,
-		Usage: bridle.Usage{
-			InputTokens:  int(completion.Usage.PromptTokens),
-			OutputTokens: int(completion.Usage.CompletionTokens),
-			// prompt_tokens_details.cached_tokens is the prefix-cache hit count
-			// on OpenAI-shape backends (OpenAI, Moonshot/kimi, DeepSeek, most
-			// gateways). Lowering it makes cache behavior OBSERVABLE at the
-			// host (agora's usage row) — without it the ~20%-hit placement
-			// regression on kimi was invisible from inside the harness.
-			// Backends that omit the field yield zero, which is also the
-			// correct "no cache" report.
-			CacheReadInputTokens: int(completion.Usage.PromptTokensDetails.CachedTokens),
-			// completion_tokens_details.reasoning_tokens: reasoner models
-			// (kimi-k3, DeepSeek) bill thinking as output; surface it so the
-			// host can tell reasoning spend from answer spend.
-			ReasoningTokens: int(completion.Usage.CompletionTokensDetails.ReasoningTokens),
-		},
+		FinalText:        finalText,
+		ToolCalls:        toolCalls,
+		Usage:            usage,
 		StopReason:       stopReason,
 		ResolvedModel:    completion.Model,
 		SessionDelta:     sessionDelta,
