@@ -272,6 +272,18 @@ func extractResult(completion *openai.ChatCompletion, streamReasoning string) (b
 		Usage: bridle.Usage{
 			InputTokens:  int(completion.Usage.PromptTokens),
 			OutputTokens: int(completion.Usage.CompletionTokens),
+			// prompt_tokens_details.cached_tokens is the prefix-cache hit count
+			// on OpenAI-shape backends (OpenAI, Moonshot/kimi, DeepSeek, most
+			// gateways). Lowering it makes cache behavior OBSERVABLE at the
+			// host (agora's usage row) — without it the ~20%-hit placement
+			// regression on kimi was invisible from inside the harness.
+			// Backends that omit the field yield zero, which is also the
+			// correct "no cache" report.
+			CacheReadInputTokens: int(completion.Usage.PromptTokensDetails.CachedTokens),
+			// completion_tokens_details.reasoning_tokens: reasoner models
+			// (kimi-k3, DeepSeek) bill thinking as output; surface it so the
+			// host can tell reasoning spend from answer spend.
+			ReasoningTokens: int(completion.Usage.CompletionTokensDetails.ReasoningTokens),
 		},
 		StopReason:       stopReason,
 		ResolvedModel:    completion.Model,
