@@ -138,3 +138,54 @@ func itoa(n int) string {
 	}
 	return string(b)
 }
+
+// TestUsage_OpenRouterCostExtraField — OpenRouter (and LiteLLM forwarding
+// it) reports the exact upstream charge as a non-standard `cost` field on
+// the usage block. The provider must lower it into Usage.CostUSD — and the
+// stream accumulator must not drop the extra field on the way through.
+func TestUsage_OpenRouterCostExtraField(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		sseWrite(w, `{"id":"c1","object":"chat.completion.chunk","created":1,"model":"test-model","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"finish_reason":null}]}`)
+		sseWrite(w, `{"id":"c1","object":"chat.completion.chunk","created":1,"model":"test-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1310,"completion_tokens":16,"total_tokens":1326,"cost":0.00417,"prompt_tokens_details":{"cached_tokens":1280}}}`)
+		sseWrite(w, "[DONE]")
+	}))
+	defer srv.Close()
+
+	p := openai.NewWithBaseURL("sk-test-key", srv.URL)
+	res, err := p.RunTurn(context.Background(), bridle.ProviderRequest{
+		Model:    "test-model",
+		Messages: []bridle.ProviderMessage{{Role: "user", Content: "hi"}},
+	}, nullSink{})
+	if err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	if res.Usage.CostUSD != 0.00417 {
+		t.Errorf("CostUSD = %v, want 0.00417 (the OpenRouter-reported charge)", res.Usage.CostUSD)
+	}
+	if res.Usage.CacheReadInputTokens != 1280 {
+		t.Errorf("CacheReadInputTokens = %d, want 1280", res.Usage.CacheReadInputTokens)
+	}
+}
+
+// TestUsage_NoCostFieldZero — standard OpenAI backends have no `cost`
+// extra field; CostUSD stays zero (host may price-table it instead).
+func TestUsage_NoCostFieldZero(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		streamWithUsage(w, 17, 5)
+	}))
+	defer srv.Close()
+
+	p := openai.NewWithBaseURL("sk-test-key", srv.URL)
+	res, err := p.RunTurn(context.Background(), bridle.ProviderRequest{
+		Model:    "test-model",
+		Messages: []bridle.ProviderMessage{{Role: "user", Content: "hi"}},
+	}, nullSink{})
+	if err != nil {
+		t.Fatalf("RunTurn: %v", err)
+	}
+	if res.Usage.CostUSD != 0 {
+		t.Errorf("CostUSD = %v, want 0 when the backend reports no cost", res.Usage.CostUSD)
+	}
+}
