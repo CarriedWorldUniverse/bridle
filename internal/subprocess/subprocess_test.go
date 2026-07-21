@@ -234,6 +234,22 @@ func TestLastUserPrompt(t *testing.T) {
 			{Role: "user", Content: "second"},
 			{Role: "assistant", Content: "trailing"},
 		}, "second"},
+		// The live-turn regression (2026-07-21): the ctxmap adapter appends a
+		// working-memory user message AFTER the operator's — the operator's
+		// text must survive in the prompt, not be shadowed by the block.
+		{"trailing user run joins, operator text survives", []bridle.ProviderMessage{
+			{Role: "user", Content: "old turn"},
+			{Role: "assistant", Content: "old reply"},
+			{Role: "user", Content: "read the docs/spec"},
+			{Role: "user", Content: "## Working memory (live view — auto-refreshed)"},
+		}, "read the docs/spec\n\n## Working memory (live view — auto-refreshed)"},
+		{"trailing run stops at prior assistant", []bridle.ProviderMessage{
+			{Role: "user", Content: "history"},
+			{Role: "assistant", Content: "reply"},
+			{Role: "user", Content: "a"},
+			{Role: "user", Content: "b"},
+			{Role: "assistant", Content: "post"},
+		}, "a\n\nb"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -246,13 +246,31 @@ func ScanJSONLines(r io.Reader, perLine func(line []byte)) error {
 //
 // Direct-API providers need history reassembled because they have no
 // subprocess-owned session store — they must not use this function.
+//
+// "Most recent user message" means the whole TRAILING RUN of user
+// messages, joined in order — not the literal last element. A harness
+// layer may append its own user-role message after the operator's (the
+// ctxmap adapter appends a working-memory block last, for direct-API
+// prompt-cache stability); taking only the literal last message made
+// that block SHADOW the operator's text, and every subprocess turn ran
+// with no task while the model politely stood by (observed live
+// 2026-07-21, fable via claudesdk). Prior turns' messages are still
+// excluded — the argv-budget rationale above is about history, and a
+// trailing run is one turn's worth.
 func LastUserPrompt(msgs []bridle.ProviderMessage) string {
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Role == "user" {
-			return msgs[i].Content
-		}
+	end := len(msgs)
+	for end > 0 && msgs[end-1].Role != "user" {
+		end--
 	}
-	return ""
+	start := end
+	for start > 0 && msgs[start-1].Role == "user" {
+		start--
+	}
+	parts := make([]string, 0, end-start)
+	for _, m := range msgs[start:end] {
+		parts = append(parts, m.Content)
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // graceWindow is how long WatchCancel waits after the graceful
