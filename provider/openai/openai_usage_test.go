@@ -167,6 +167,14 @@ func TestUsage_OpenRouterCostExtraField(t *testing.T) {
 	if res.Usage.CacheReadInputTokens != 1280 {
 		t.Errorf("CacheReadInputTokens = %d, want 1280", res.Usage.CacheReadInputTokens)
 	}
+	// bridle.Usage's contract: InputTokens = UNCACHED prompt tokens. The
+	// OpenAI-shape prompt_tokens total (1310) INCLUDES the 1280 cached —
+	// lowering must subtract, or claude-lane (natively disjoint) and
+	// openai-lane usage mean different things and every consumer's cache%%
+	// and billing math is wrong for one of them.
+	if res.Usage.InputTokens != 30 {
+		t.Errorf("InputTokens = %d, want 30 (1310 total - 1280 cached; uncached-only contract)", res.Usage.InputTokens)
+	}
 }
 
 // TestUsage_NoCostFieldZero — standard OpenAI backends have no `cost`
