@@ -222,7 +222,12 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 // extra field (exact upstream USD; absent on standard OpenAI backends → 0).
 func usageFromChunk(u openai.CompletionUsage) bridle.Usage {
 	usage := bridle.Usage{
-		InputTokens:          int(u.PromptTokens),
+		// bridle.Usage's contract: InputTokens = UNCACHED prompt tokens
+		// (harness.go). OpenAI-shape prompt_tokens INCLUDES the cached
+		// prefix, so subtract the detail count to conform — the claude
+		// lane reports these fields disjoint natively, and a consumer
+		// computing cache%% or billing must see ONE semantics.
+		InputTokens:          uncachedPrompt(int(u.PromptTokens), int(u.PromptTokensDetails.CachedTokens)),
 		OutputTokens:         int(u.CompletionTokens),
 		CacheReadInputTokens: int(u.PromptTokensDetails.CachedTokens),
 		ReasoningTokens:      int(u.CompletionTokensDetails.ReasoningTokens),
@@ -313,7 +318,9 @@ func extractResult(completion *openai.ChatCompletion, streamReasoning string) (b
 	stopReason := normalize.OpenAIStopReason(string(choice.FinishReason))
 
 	usage := bridle.Usage{
-		InputTokens:  int(completion.Usage.PromptTokens),
+		// Conform to bridle.Usage's uncached-only InputTokens contract —
+		// see usageFromChunk.
+		InputTokens:  uncachedPrompt(int(completion.Usage.PromptTokens), int(completion.Usage.PromptTokensDetails.CachedTokens)),
 		OutputTokens: int(completion.Usage.CompletionTokens),
 		// prompt_tokens_details.cached_tokens is the prefix-cache hit count
 		// on OpenAI-shape backends (OpenAI, Moonshot/kimi, DeepSeek, most
@@ -537,4 +544,14 @@ func toOpenAIToolChoice(choice string) *openai.ChatCompletionToolChoiceOptionUni
 		)
 		return &named
 	}
+}
+
+// uncachedPrompt converts an OpenAI-shape prompt total (which INCLUDES the
+// cached prefix) to bridle.Usage's uncached-only InputTokens, clamped at 0
+// for backends that report a cached detail larger than the total.
+func uncachedPrompt(promptTotal, cached int) int {
+	if cached > promptTotal {
+		return 0
+	}
+	return promptTotal - cached
 }
