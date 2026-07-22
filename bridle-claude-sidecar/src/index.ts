@@ -196,17 +196,35 @@ async function main(): Promise<void> {
     allowedTools = [...init.allowed_tools, ...mcpToolNames];
   } // else undefined: agent-mode default native toolset, mcp tools still reachable unrestricted
 
-  // BeforeToolCall gating for CUSTOM tools happens bridle-side (the
-  // harness's BeforeToolCallCtx hook fires inside executeToolCall, on
-  // the OTHER end of the tool_call/tool_result round trip above) — not
-  // here. canUseTool default-allows; it's the SDK's separate native-tool
-  // permission gate and bridle doesn't have a second opinion to add for
-  // v1 (spec's canUseTool line: "forwards permission decisions ... default
-  // allow").
-  const canUseTool: CanUseTool = async (_toolName, input) => ({
-    behavior: 'allow',
-    updatedInput: input,
-  });
+  // BeforeToolCall gating for CUSTOM (bridle mcp) tools happens bridle-side
+  // (the harness's BeforeToolCallCtx hook fires inside executeToolCall) — those
+  // tools are auto-approved via allowedTools and never reach canUseTool.
+  //
+  // So in FUNNEL mode, every tool that DOES reach canUseTool is a NATIVE tool
+  // (Read/Write/Edit/Bash/…). Auto-allowing them (the old `behavior: 'allow'`)
+  // let native tools run entirely OUTSIDE agora's approval gate and containment
+  // — defeating funnel mode's own contract ("all native tools off; Claude sees
+  // only bridle's tools"). DENY them: the model is pushed onto bridle's gated,
+  // sandboxed tools (read_file / write_file / run_command). In agent mode we
+  // keep the default-allow (native toolset is intentional there).
+  const canUseTool: CanUseTool = async (toolName, input) => {
+    if (init.mode === 'funnel') {
+      return {
+        behavior: 'deny',
+        message: `Native tool "${toolName}" is disabled in this session — use the bridle tools (read_file, write_file, run_command).`,
+      };
+    }
+    return { behavior: 'allow', updatedInput: input };
+  };
+
+  // Hard block: allowedTools/permissionMode/canUseTool do NOT keep the SDK's
+  // native toolset out of a funnel-mode turn (verified: native Bash still ran).
+  // disallowedTools is the only reliable lever — list every built-in so the
+  // model is forced onto bridle's gated mcp tools.
+  const NATIVE_TOOLS = ['Task', 'Bash', 'BashOutput', 'KillShell', 'KillBash', 'Glob', 'Grep', 'Read', 'Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'TodoWrite', 'ExitPlanMode', 'SlashCommand', 'ListMcpResources', 'ReadMcpResource'];
+  const effectiveDisallowed = init.mode === 'funnel'
+    ? [...NATIVE_TOOLS, ...(init.disallowed_tools ?? [])]
+    : init.disallowed_tools;
 
   const options: Options = {
     systemPrompt: init.system_prompt_append
@@ -216,7 +234,15 @@ async function main(): Promise<void> {
     maxTurns: init.max_turns,
     cwd: init.cwd,
     allowedTools,
-    disallowedTools: init.disallowed_tools,
+    disallowedTools: effectiveDisallowed,
+    // Funnel mode = agora owns ALL tools + approvals. 'dontAsk' means "deny any
+    // tool that isn't pre-approved" — and only the bridle mcp tools are
+    // pre-approved (allowedTools). So every NATIVE tool (Read/Write/Edit/Bash/…)
+    // is denied WITHOUT running, forcing the model onto bridle's gated,
+    // sandboxed tools. The default mode does NOT do this: it silently ran native
+    // Bash/Write outside agora's approval gate (canUseTool was never even
+    // invoked for them). Agent mode keeps the CLI's normal permission flow.
+    permissionMode: init.mode === 'funnel' ? 'dontAsk' : undefined,
     mcpServers,
     canUseTool,
     resume: init.resume,
