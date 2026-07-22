@@ -55,9 +55,8 @@ type Request struct {
 	Tools    []ToolDef
 
 	// Effort is the agora reasoning-effort ladder value: low | medium |
-	// high | xhigh | max (agora-spec-bridle §3). T1/T7 carries the field
-	// but does NOT yet translate it to any provider's reasoning params —
-	// per-model effort translation is T2 follow-up work. Empty is
+	// high | xhigh | max (agora-spec-bridle §3), lowered into
+	// ProviderRequest.Effort and translated per-provider (T2). Empty is
 	// equivalent to unset (provider/model default).
 	Effort string
 
@@ -281,8 +280,9 @@ func lowerStreamToProviderRequest(handle ModelHandle, req Request) ProviderReque
 		Model:              handle.Model,
 		MaxOutputTokens:    req.MaxTokens,
 		ProviderEnv:        req.ProviderEnv,
-		// Effort, Structured, CacheHints: threaded onto Request but not
-		// yet lowered into ProviderRequest fields — T2/T4/prompt-caching
+		Effort:             req.Effort,
+		// Structured, CacheHints: threaded onto Request but not yet
+		// lowered into ProviderRequest fields — T4/prompt-caching
 		// follow-up work respectively (see their doc comments on Request).
 	}
 }
@@ -310,6 +310,7 @@ func lowerStreamToTurnRequest(handle ModelHandle, req Request) TurnRequest {
 		Model:              handle.Model,
 		MaxOutputTokens:    req.MaxTokens,
 		ProviderEnv:        req.ProviderEnv,
+		Effort:             req.Effort,
 		MaxSteps:           1, // self-executing providers already stop after one round; defensive only.
 	}
 }

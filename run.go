@@ -768,6 +768,9 @@ func lowerRequest(req TurnRequest) ProviderRequest {
 		ResponseFormat:  req.ResponseFormat,
 		// Claude-only extended-thinking budget; other providers ignore it.
 		ThinkingBudgetTokens: req.ThinkingBudgetTokens,
+		// Reasoning-effort ladder; providers translate to their own knob
+		// or drop it silently (see TurnRequest.Effort).
+		Effort: req.Effort,
 		// NEX-581: per-aspect tool-call contract strictness flows to the
 		// harness's post-provider repair/retry step.
 		ToolCallStrictness: req.ToolCallStrictness,

@@ -140,6 +140,9 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		params.ToolChoice = *tc
 	}
 	// TopK: claude-only; OpenAI has no equivalent. Silently ignored.
+	if effort := toOpenAIReasoningEffort(req.Effort); effort != "" {
+		params.ReasoningEffort = effort
+	}
 
 	stream := p.getClient().Chat.Completions.NewStreaming(ctx, params)
 	acc := openai.ChatCompletionAccumulator{}
@@ -543,6 +546,26 @@ func toOpenAIToolChoice(choice string) *openai.ChatCompletionToolChoiceOptionUni
 			openai.ChatCompletionNamedToolChoiceFunctionParam{Name: choice},
 		)
 		return &named
+	}
+}
+
+// toOpenAIReasoningEffort maps the agora effort ladder (low | medium |
+// high | xhigh | max) onto OpenAI's three-tier reasoning_effort
+// (low | medium | high — no higher tier exists on the API today).
+// xhigh/max both clamp to high rather than being dropped: they're
+// still "spend more reasoning than default" requests, and high is
+// OpenAI's ceiling. Empty/unrecognized input returns "" (unset —
+// omitzero on the SDK param leaves reasoning_effort off the wire).
+func toOpenAIReasoningEffort(effort string) shared.ReasoningEffort {
+	switch effort {
+	case "low":
+		return shared.ReasoningEffortLow
+	case "medium":
+		return shared.ReasoningEffortMedium
+	case "high", "xhigh", "max":
+		return shared.ReasoningEffortHigh
+	default:
+		return ""
 	}
 }
 

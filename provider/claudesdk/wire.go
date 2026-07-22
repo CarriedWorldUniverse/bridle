@@ -45,6 +45,13 @@ type sidecarInit struct {
 	MaxTurns int    `json:"max_turns,omitempty"`
 	Cwd      string `json:"cwd,omitempty"`
 
+	// Effort mirrors ProviderRequest.Effort, passed through verbatim to
+	// the SDK's Options.effort (sdk.d.ts: EffortLevel = 'low' | 'medium'
+	// | 'high' | 'xhigh' | 'max' — the SAME ladder agora-spec-bridle §3
+	// uses, no translation needed on this lane). Empty = provider
+	// default (index.ts omits the option entirely).
+	Effort string `json:"effort,omitempty"`
+
 	// Mode is "funnel" (all native tools off, Claude sees only Tools) or
 	// "agent" (native toolset per AllowedTools/DisallowedTools) — spec §3.
 	Mode            string           `json:"mode"`

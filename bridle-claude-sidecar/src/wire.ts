@@ -20,6 +20,11 @@ export interface SidecarInit {
   resume?: string;
   max_turns?: number;
   cwd?: string;
+  // Reasoning-effort ladder (agora-spec-bridle §3), passed through
+  // verbatim to the Agent SDK's Options.effort — same vocabulary
+  // ('low'|'medium'|'high'|'xhigh'|'max'), no translation needed.
+  // Absent/undefined = provider default (option omitted).
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   mode: 'funnel' | 'agent';
   allowed_tools?: string[];
   disallowed_tools?: string[];

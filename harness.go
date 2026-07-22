@@ -190,6 +190,12 @@ type TurnRequest struct {
 	// providers ignore it, same as Seed/TopK precedent.
 	ThinkingBudgetTokens int
 
+	// Effort is the agora reasoning-effort ladder value: low | medium |
+	// high | xhigh | max (agora-spec-bridle §3). Empty = provider
+	// default (no translation attempted). Providers that can't express
+	// a tier at all drop it silently, same as Seed/TopK precedent.
+	Effort string
+
 	// MaxOutputTokens caps generation length. 0 = provider default
 	// (claude internally falls back to 4096; openai uses its own
 	// account-level default). Set non-zero for cost-bounded paths

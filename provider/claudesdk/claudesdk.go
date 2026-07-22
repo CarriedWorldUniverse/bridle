@@ -379,6 +379,7 @@ func (p *Provider) buildInit(req bridle.ProviderRequest) sidecarInit {
 		Cwd:                req.Cwd,
 		Mode:               string(p.Mode),
 		BeforeToolCallGate: true,
+		Effort:             req.Effort,
 	}
 	// Only the append system-prompt lane is offered in v1 (spec §5): the
 	// claude-code preset is always the base; SystemPromptReplace isn't

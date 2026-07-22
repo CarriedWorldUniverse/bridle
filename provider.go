@@ -89,6 +89,11 @@ type ProviderRequest struct {
 	// providers ignore it, same as Seed/TopK precedent.
 	ThinkingBudgetTokens int
 
+	// Effort mirrors TurnRequest.Effort (see its doc comment for the
+	// ladder). Providers translate it to their own reasoning-effort knob
+	// where they have one, and silently drop it otherwise.
+	Effort string
+
 	// ToolCallStrictness mirrors TurnRequest.ToolCallStrictness so the
 	// harness's post-provider tool-call contract step (NEX-581) can read
 	// the per-aspect knob from the lowered request. Providers themselves
