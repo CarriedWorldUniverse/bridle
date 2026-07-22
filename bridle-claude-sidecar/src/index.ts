@@ -248,6 +248,15 @@ async function main(): Promise<void> {
     resume: init.resume,
     sessionId: init.session_id,
   };
+  // Reasoning-effort ladder (agora-spec-bridle §3): the SDK's Options.effort
+  // uses the SAME vocabulary bridle's wire carries ('low'|'medium'|'high'|
+  // 'xhigh'|'max'), so this is a straight passthrough, no translation.
+  // Only set when non-empty — an explicit `effort: undefined` still shows up
+  // as an own-property on the options object, which is harmless here but
+  // the guard keeps the omitted-means-default contract obvious.
+  if (init.effort) {
+    options.effort = init.effort;
+  }
 
   if (init.extra_opts) {
     Object.assign(options, init.extra_opts);
