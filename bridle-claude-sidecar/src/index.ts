@@ -198,17 +198,31 @@ async function main(): Promise<void> {
 
   // BeforeToolCall gating for CUSTOM (bridle mcp) tools happens bridle-side
   // (the harness's BeforeToolCallCtx hook fires inside executeToolCall) — those
-  // tools are auto-approved via allowedTools and never reach canUseTool.
+  // tools are auto-approved via allowedTools and NORMALLY never reach
+  // canUseTool at all. But the SDK's own Plan Mode (ExitPlanMode / the
+  // client's plan-mode toggle) reroutes EVERY tool call — including
+  // already-approved mcp ones — through canUseTool for the duration of
+  // planning, as its own "nothing executes while planning" guarantee.
+  // Without the mcpToolNames check below, that reroute hit the funnel-mode
+  // deny-everything branch and blocked bridle's OWN gated tools
+  // (read_file/write_file/run_command/question/...) mid-plan, using a
+  // message written for genuinely-native tools — observed: every bridle
+  // mcp call failing with "Native tool ... is disabled" while Plan Mode
+  // was active, even though those tools aren't native at all.
   //
-  // So in FUNNEL mode, every tool that DOES reach canUseTool is a NATIVE tool
-  // (Read/Write/Edit/Bash/…). Auto-allowing them (the old `behavior: 'allow'`)
-  // let native tools run entirely OUTSIDE agora's approval gate and containment
-  // — defeating funnel mode's own contract ("all native tools off; Claude sees
-  // only bridle's tools"). DENY them: the model is pushed onto bridle's gated,
-  // sandboxed tools (read_file / write_file / run_command). In agent mode we
+  // So in FUNNEL mode, a toolName NOT in mcpToolNames is always a NATIVE
+  // tool (Read/Write/Edit/Bash/…), reaching canUseTool either directly or
+  // via Plan Mode's reroute. Auto-allowing them (the old unconditional
+  // `behavior: 'allow'`) let native tools run entirely OUTSIDE agora's
+  // approval gate and containment — defeating funnel mode's own contract
+  // ("all native tools off; Claude sees only bridle's tools"). DENY them:
+  // the model is pushed onto bridle's gated, sandboxed tools. A toolName
+  // that IS in mcpToolNames is one of bridle's own — allow it through to
+  // bridle's real (BeforeToolCall) gate rather than dying here, whether it
+  // arrived via the normal bypass or Plan Mode's reroute. In agent mode we
   // keep the default-allow (native toolset is intentional there).
   const canUseTool: CanUseTool = async (toolName, input) => {
-    if (init.mode === 'funnel') {
+    if (init.mode === 'funnel' && !mcpToolNames.includes(toolName)) {
       return {
         behavior: 'deny',
         message: `Native tool "${toolName}" is disabled in this session — use the bridle tools (read_file, write_file, run_command).`,
