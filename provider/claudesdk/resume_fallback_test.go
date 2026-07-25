@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,9 @@ import (
 // from attempt 1.
 func writeResumeAwareSidecar(t *testing.T, notFoundMsg string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake-sidecar shell script unsupported on windows")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bridle-claude-sidecar")
 	script := `#!/bin/sh
