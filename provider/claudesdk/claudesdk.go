@@ -153,6 +153,8 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		retryDelay = 2 * time.Second
 	}
 
+	resumedFresh := false
+
 	for attempt := 0; ; attempt++ {
 		if ctx.Err() != nil {
 			return bridle.ProviderResult{}, ctx.Err()
@@ -162,6 +164,30 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		if err == nil {
 			return result, nil
 		}
+
+		// Session-resume-not-found: a continuing turn asked to resume a
+		// session the CLI can't find (expired/pruned). The prior context
+		// is unrecoverable, so degrade to a FRESH session rather than
+		// hard-failing the turn — with a logged warning so the lost
+		// context is visible. Checked before isRetryable: a not-found
+		// resume is permanent and must not be retried against the same
+		// dead id. Only on a genuine not-found signal: auth/rate/network
+		// fall through to the normal retry/propagate paths so a
+		// transient blip doesn't silently drop a caller's session.
+		// resumedFresh guards against looping if the fresh attempt
+		// itself somehow reports not-found. Ported from claudecode.
+		if req.Session.ID != "" && !req.Session.New && !resumedFresh && subprocess.IsResumeNotFound(err.Error()) {
+			sink.Emit(bridle.TurnError{
+				Err: fmt.Errorf("claudesdk: resume of session %q failed (missing/expired) — falling back to a fresh session; prior context is lost: %w",
+					req.Session.ID, err),
+				Stage: bridle.TurnErrorStageResumeFallback,
+			})
+			resumedFresh = true
+			req.Session.ID = ""
+			req.Session.New = false
+			continue
+		}
+
 		if !isRetryable(err) {
 			return result, err
 		}
