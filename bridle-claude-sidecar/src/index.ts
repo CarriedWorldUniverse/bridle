@@ -351,6 +351,30 @@ async function main(): Promise<void> {
             }
           }
         }
+      } else if (anyMsg.type === 'rate_limit_event') {
+        // A wholly separate SDK message type from the "rate_limit"
+        // ERROR CLASS handled above at classifySdkErrorMessage (that is
+        // an assistant turn failing outright) — this fires on ANY
+        // plan-usage change, success or not, and never ends the turn.
+        const info = anyMsg.rate_limit_info as
+          | {
+              status?: string;
+              rateLimitType?: string;
+              utilization?: number;
+              resetsAt?: number;
+              isUsingOverage?: boolean;
+            }
+          | undefined;
+        if (info) {
+          emit({
+            type: 'rate_limit_event',
+            rate_limit_status: info.status ?? '',
+            rate_limit_type: info.rateLimitType ?? '',
+            rate_limit_utilization: info.utilization ?? 0,
+            rate_limit_resets_at_ms: info.resetsAt ?? 0,
+            rate_limit_using_overage: info.isUsingOverage ?? false,
+          });
+        }
       } else if (anyMsg.type === 'result') {
         sawResult = true;
         const usage = anyMsg.usage as

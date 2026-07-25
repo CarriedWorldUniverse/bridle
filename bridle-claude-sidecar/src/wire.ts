@@ -96,6 +96,20 @@ export interface EventError {
   message: string;
 }
 
+// claude.ai subscription plan-usage state — a WHOLLY SEPARATE SDK
+// message type from EventError's "rate_limit" class above (that is an
+// assistant turn failing; this is a usage reading that can fire on any
+// turn, success or not, and never ends one). See bridle's RateLimit
+// event doc comment (events.go) for the field semantics this mirrors.
+export interface EventRateLimit {
+  type: 'rate_limit_event';
+  rate_limit_status: string;
+  rate_limit_type: string;
+  rate_limit_utilization: number;
+  rate_limit_resets_at_ms: number;
+  rate_limit_using_overage: boolean;
+}
+
 export type SidecarOutbound =
   | EventTextDelta
   | EventThinkingDelta
@@ -103,4 +117,5 @@ export type SidecarOutbound =
   | EventNativeTool
   | EventUsage
   | EventDone
-  | EventError;
+  | EventError
+  | EventRateLimit;

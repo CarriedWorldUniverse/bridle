@@ -497,6 +497,23 @@ func (p *Provider) pumpEvents(ctx context.Context, req bridle.ProviderRequest, s
 				Kind:    classifyWireErrorClass(ev.Class),
 				Message: "claudesdk: " + ev.Message,
 			}
+
+		case "rate_limit_event":
+			// A wholly separate SDK message type from the "error" class
+			// "rate_limit" above — this fires on ANY plan-usage change,
+			// success or not, and never ends the turn.
+			var resetsAt time.Time
+			if ev.RateLimitResetsAtMs > 0 {
+				resetsAt = time.UnixMilli(ev.RateLimitResetsAtMs)
+			}
+			sink.Emit(bridle.RateLimit{
+				Status:       ev.RateLimitStatus,
+				WindowType:   ev.RateLimitType,
+				Utilization:  ev.RateLimitUtilization,
+				ResetsAt:     resetsAt,
+				UsingOverage: ev.RateLimitUsingOverage,
+				TS:           time.Now(),
+			})
 		}
 	})
 }

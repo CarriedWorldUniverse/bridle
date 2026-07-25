@@ -41,6 +41,36 @@ type Warning struct {
 	TS      time.Time // stamped by the harness at emission; zero outside a harness turn
 }
 
+// RateLimit fires when the provider signals a change in claude.ai
+// subscription rate-limit state — window utilization or a transition
+// into paid overage. Provider-specific: today only claudesdk emits it
+// (a real claude.ai subscription session); API-key, Bedrock, Vertex and
+// other providers never do, since plan limits do not apply to them. A
+// caller must not treat its absence as "usage is fine" — it means "this
+// provider has no concept of plan usage to report".
+type RateLimit struct {
+	// Status is the provider's own coarse verdict: "allowed",
+	// "allowed_warning", or "rejected" — cheaper for a caller to react to
+	// than deriving a threshold from Utilization itself.
+	Status string
+	// WindowType names which window this reading is for — e.g.
+	// "five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet",
+	// "seven_day_overage_included", "overage" — or "" when the provider
+	// did not specify one.
+	WindowType string
+	// Utilization is 0-100. 0 covers both "just reset" and "not
+	// reported" — the provider does not distinguish them either
+	// (agora-spec-bridle's usage convention: a floor, not a
+	// billing-grade count).
+	Utilization int
+	// ResetsAt is when this window resets; the zero Time when unknown.
+	ResetsAt time.Time
+	// UsingOverage is true once the session has started drawing on paid
+	// overage credits rather than the plan's included allowance.
+	UsingOverage bool
+	TS           time.Time // stamped by the harness at emission; zero outside a harness turn
+}
+
 // ToolCallStart fires when the model requests a tool call, before execution.
 type ToolCallStart struct {
 	ID   string
@@ -230,3 +260,4 @@ func (TurnDone) event()        {}
 func (TurnError) event()       {}
 func (MCPServerFailed) event() {}
 func (Warning) event()         {}
+func (RateLimit) event()       {}
