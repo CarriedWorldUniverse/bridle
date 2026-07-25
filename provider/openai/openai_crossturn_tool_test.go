@@ -26,6 +26,7 @@ import (
 type capturedRequest struct {
 	Model    string                   `json:"model"`
 	Messages []map[string]interface{} `json:"messages"`
+	Tools    []map[string]interface{} `json:"tools,omitempty"`
 }
 
 func runWithCapture(t *testing.T, req bridle.ProviderRequest) capturedRequest {
