@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -89,7 +90,10 @@ func (p *Provider) getClient() *openai.Client {
 // post-stream result extraction.
 func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink bridle.EventSink) (bridle.ProviderResult, error) {
 	messages := toOpenAIMessages(req.AppendSystemPrompt, req.Messages)
-	tools := toOpenAITools(req.Tools)
+	tools, err := toOpenAITools(req.Tools)
+	if err != nil {
+		return bridle.ProviderResult{}, fmt.Errorf("openai: %w", err)
+	}
 
 	params := openai.ChatCompletionNewParams{
 		Model:    req.Model,
@@ -209,7 +213,7 @@ func (p *Provider) RunTurn(ctx context.Context, req bridle.ProviderRequest, sink
 		return bridle.ProviderResult{}, fmt.Errorf("openai: API error: %w", err)
 	}
 
-	res, err := extractResult(&acc.ChatCompletion, reasoningBuf.String())
+	res, err := extractResult(&acc.ChatCompletion, reasoningBuf.String(), req.Tools)
 	if err == nil && haveStreamUsage {
 		// The captured chunk carries the FULL usage block straight off the
 		// wire — totals, details, and extra fields — so it supersedes the
@@ -252,7 +256,12 @@ func usageFromChunk(u openai.CompletionUsage) bridle.Usage {
 // ChatCompletion. Chunks were already emitted live during the stream
 // loop, so this just lowers the assembled completion into a
 // bridle.ProviderResult.
-func extractResult(completion *openai.ChatCompletion, streamReasoning string) (bridle.ProviderResult, error) {
+// defs is the SAME tool def list this turn's request was built from —
+// needed to reverse a sanitized wire name (see toOpenAITools/
+// unsanitizeToolName) back to the name the caller actually sent, so
+// bridle.ToolInvocation.Name matches what the caller registered rather
+// than a mangled wire form.
+func extractResult(completion *openai.ChatCompletion, streamReasoning string, defs []bridle.ToolDef) (bridle.ProviderResult, error) {
 	if len(completion.Choices) == 0 {
 		return bridle.ProviderResult{StopReason: bridle.StopReasonModelDone}, nil
 	}
@@ -272,7 +281,7 @@ func extractResult(completion *openai.ChatCompletion, streamReasoning string) (b
 		argsJSON := json.RawMessage(tc.Function.Arguments)
 		toolCalls = append(toolCalls, bridle.ToolInvocation{
 			ID:   tc.ID,
-			Name: tc.Function.Name,
+			Name: unsanitizeToolName(tc.Function.Name, defs),
 			Args: argsJSON,
 		})
 		raw, _ := json.Marshal(tc)
@@ -419,7 +428,13 @@ func toOpenAIMessages(systemPrompt string, msgs []bridle.ProviderMessage) []open
 					tcs = append(tcs, openai.ChatCompletionMessageToolCallParam{
 						ID: tc.ID,
 						Function: openai.ChatCompletionMessageToolCallFunctionParam{
-							Name:      tc.Name,
+							// sanitizeToolName is PURE and deterministic
+							// specifically so this independent call site
+							// (replaying a PAST tool call from session
+							// history) derives the exact same wire name
+							// toOpenAITools sent for the ORIGINAL call,
+							// with no state shared between the two.
+							Name:      sanitizeToolName(tc.Name),
 							Arguments: string(tc.Args),
 						},
 					})
@@ -446,14 +461,74 @@ func toOpenAIMessages(systemPrompt string, msgs []bridle.ProviderMessage) []open
 	return out
 }
 
-func toOpenAITools(defs []bridle.ToolDef) []openai.ChatCompletionToolParam {
+// toolNameRe is OpenAI's function-name charset (the exact wording of the
+// 400 this exists to prevent: "function name is invalid, must start with a
+// letter and can contain letters, numbers, underscores, and dashes"). Not
+// documented in the SDK's own types — pinned here from the live error text,
+// verified against the real API (see openai_toolname_test.go's live-gated
+// case).
+var toolNameRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_-]*$`)
+
+// sanitizeToolName maps a bridle tool name onto OpenAI's function-name
+// charset. PURE and deterministic — same input always gives the same
+// output — because it is called from TWO INDEPENDENT sites that must
+// agree with no shared state: toOpenAITools (the current turn's tool
+// listing) and toOpenAIMessages (replaying a tool call from a PAST turn's
+// session history). A stateful, order-dependent disambiguation scheme
+// (e.g. "append _2 on collision") would give those two call sites
+// different answers for the same name across two separate calls, silently
+// corrupting history replay — so collisions are surfaced as an error at
+// the listing site instead (see toOpenAITools), never disambiguated here.
+//
+// Immediately relevant for bridle callers' own dotted names (agora's
+// task.write, memory.read, bg.output, ...), which pass fine on Anthropic's
+// more permissive API and only surface here, on this specific lane. Just
+// as important: an MCP-sourced tool's name is whatever the THIRD-PARTY MCP
+// SERVER chose, entirely outside any bridle caller's control — a server
+// naming a tool "search.web" or "1-lookup" hits the identical 400 with no
+// caller-side fix available at all, so the adaptation has to live here, in
+// the provider that actually needs it.
+func sanitizeToolName(name string) string {
+	if toolNameRe.MatchString(name) {
+		return name
+	}
+	var b strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	s := b.String()
+	if s == "" || !((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z')) {
+		s = "t_" + s
+	}
+	return s
+}
+
+// toOpenAITools lowers bridle's tool defs onto the wire, sanitizing any
+// name outside OpenAI's function-name charset. Errors if two DISTINCT
+// names sanitize to the same wire name — genuinely not distinguishable on
+// this backend, and silently letting the second shadow the first would
+// misroute every call to whichever tool happened to register last; a
+// clear error here is better than a wrong tool silently running.
+func toOpenAITools(defs []bridle.ToolDef) ([]openai.ChatCompletionToolParam, error) {
 	if len(defs) == 0 {
-		return nil
+		return nil, nil
 	}
 	out := make([]openai.ChatCompletionToolParam, 0, len(defs))
+	seen := make(map[string]string, len(defs)) // wire name -> original, for the collision error
 	for _, d := range defs {
+		wireName := sanitizeToolName(d.Name)
+		if prior, dup := seen[wireName]; dup && prior != d.Name {
+			return nil, fmt.Errorf("tool names %q and %q both sanitize to %q — not distinguishable on this backend",
+				prior, d.Name, wireName)
+		}
+		seen[wireName] = d.Name
+
 		fn := shared.FunctionDefinitionParam{
-			Name: d.Name,
+			Name: wireName,
 		}
 		if d.Description != "" {
 			fn.Description = openai.String(d.Description)
@@ -468,7 +543,26 @@ func toOpenAITools(defs []bridle.ToolDef) []openai.ChatCompletionToolParam {
 			Function: fn,
 		})
 	}
-	return out
+	return out, nil
+}
+
+// unsanitizeToolName reverses sanitizeToolName against the CURRENT turn's
+// actual tool defs — the only correct way to reverse it, since the
+// transform is not information-preserving in general (e.g. "task.write"
+// and "task_write" both sanitize to "task_write"; only the caller's own
+// def list says which original name a given wire name actually meant this
+// turn). A wire name with no match (the model somehow returned something
+// outside the sent set) passes through unchanged rather than erroring —
+// the caller's own Handles()-based dispatch already turns an unrecognized
+// name into a clean per-call error; duplicating that here would be a
+// second, less informed source of truth for the same judgment.
+func unsanitizeToolName(wireName string, defs []bridle.ToolDef) string {
+	for _, d := range defs {
+		if sanitizeToolName(d.Name) == wireName {
+			return d.Name
+		}
+	}
+	return wireName
 }
 
 // toOpenAIResponseFormat maps bridle's ResponseFormat to OpenAI's
