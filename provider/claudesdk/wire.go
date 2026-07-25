@@ -130,4 +130,15 @@ type sidecarEvent struct {
 	// error
 	Class   string `json:"class,omitempty"` // auth | rate_limit | provider | refusal
 	Message string `json:"message,omitempty"`
+
+	// rate_limit_event (claude.ai subscription plan state; claudesdk
+	// only — see bridle.RateLimit's doc comment). Field names are
+	// prefixed RateLimit* rather than reused (e.g. Class/Message above
+	// are the UNRELATED assistant-error "rate_limit" class) since this
+	// is a wholly separate SDK message type, not a variant of "error".
+	RateLimitStatus       string `json:"rate_limit_status,omitempty"`
+	RateLimitType         string `json:"rate_limit_type,omitempty"`
+	RateLimitUtilization  int    `json:"rate_limit_utilization,omitempty"`
+	RateLimitResetsAtMs   int64  `json:"rate_limit_resets_at_ms,omitempty"`
+	RateLimitUsingOverage bool   `json:"rate_limit_using_overage,omitempty"`
 }
