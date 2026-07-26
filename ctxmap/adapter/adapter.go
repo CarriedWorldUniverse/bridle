@@ -254,7 +254,7 @@ func (a *attachment) afterToolCall(_ context.Context, in bridle.AfterToolCallCtx
 	// distillation — the extractor should see the real content, not a summary.
 	// Skip write_file: its result echoes what the model just authored (no new
 	// knowledge) and re-mining it would just backlog the extractor.
-	if a.ingest && in.Call.Name != "write_file" {
+	if a.ingest && in.Call.Name != "write_file" && in.Call.Name != "Write" {
 		a.eng.IngestToolResult(in.Call.Name, raw, a.focus)
 	}
 	shown := a.eng.DistillToolResult(in.Call.Name, raw)
