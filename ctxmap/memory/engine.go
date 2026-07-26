@@ -203,8 +203,20 @@ func (e *Engine) ObserveTool(toolName string, args json.RawMessage, result strin
 	if !e.workingState {
 		return
 	}
-	var a struct{ Path, Command string }
+	// FilePath is the advertised spelling on the fs tools (matching Claude's
+	// native Read/Write/Edit); Path is the legacy one, still accepted. Go's
+	// json matches Path case-insensitively but NOT "file_path", so both
+	// fields are needed or a native-shaped call records an empty path and
+	// silently drops out of the working-state block.
+	var a struct {
+		FilePath string `json:"file_path"`
+		Path     string `json:"path"`
+		Command  string `json:"command"`
+	}
 	json.Unmarshal(args, &a)
+	if a.Path == "" {
+		a.Path = a.FilePath
+	}
 	// tool results arrive JSON-encoded (host marshals the string); decode so the
 	// state block shows clean text, not escaped bytes
 	clean := result
@@ -215,20 +227,20 @@ func (e *Engine) ObserveTool(toolName string, args json.RawMessage, result strin
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	switch toolName {
-	case "write_file":
+	case "write_file", "Write", "edit_file", "Edit":
 		if a.Path != "" {
 			if e.ws.editCnt[a.Path] == 0 {
 				e.ws.edited = append(e.ws.edited, a.Path)
 			}
 			e.ws.editCnt[a.Path]++
-			e.ws.pushRecent("write_file " + a.Path)
+			e.ws.pushRecent(toolName + " " + a.Path)
 		}
 	case "run_command":
 		e.ws.lastCmd = a.Command
 		e.ws.lastOut = tailText(clean, 14, 700)
 		e.ws.pushRecent("run_command " + firstWords(a.Command, 6))
-	case "read_file":
-		e.ws.pushRecent("read_file " + a.Path)
+	case "read_file", "Read":
+		e.ws.pushRecent(toolName + " " + a.Path)
 	case "list_files":
 		e.ws.pushRecent("list_files")
 	default:
